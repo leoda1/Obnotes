@@ -10,6 +10,6 @@ title: Home
 - **[[CUDA/index|CUDA 编程]]** - CUDA指南和一些接口review
 - **[[pytorch/index|PyTorch]]** - pytorch侧编译的一些坑
 - **[[Megatron/index|Megatron]]** - LLM训练和优化
-- **[[PTX/index|PTX]]** - 并行线程执行汇编
+- **[[Parallel Thread Execution(PTX) Programming Guide|PTX]]** - 并行线程执行汇编
 - **[[Big Feature/index|Big Feature]]** - 公司/自己的R&D project
 

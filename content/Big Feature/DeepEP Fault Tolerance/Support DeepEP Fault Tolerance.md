@@ -33,6 +33,8 @@ c. 具体的传输在NVSHMEM的[[ibgda.cpp]]内实现。
 在 `nvshmemt_init` 函数中枚举 IB 设备后，根据网卡配置创建备份 QP 映射关系：
 - **一卡一口**：相邻网卡互备（mlx5_0↔mlx5_1, mlx5_2↔mlx5_3, mlx5_4↔mlx5_5, mlx5_6↔mlx5_7）
 - **一卡两口**：同一网卡的两个端口互备
+- 建backup QP，CQ等等
+![[Support DeepEP Fault Tolerance 2025-11-10 21.03.35.excalidraw  | 100%]]
 ### 2.1.1 扩展数据结构
 在 `nvshmemt_ibgda_state_t` 结构体添加备份QP字段：
 ```c
@@ -47,7 +49,21 @@ typedef struct {
     bool *is_single_port_card;  // 标记是否为一卡一口
 } nvshmemt_ibgda_state_t;
 ```
+在rc结构体内添加单个设备的备份QP的字段：
+```cpp
+struct {
+        struct ibgda_ep **eps;
+        struct ibgda_rc_handle *peer_ep_handles;
 
+        struct ibgda_ep **backup_eps;            // 备份 RC 端点
+        struct ibgda_rc_handle *backup_peer_ep_handles; // 备份 RC 对等句柄
+        int backup_dev_id;                       // 此设备的备份设备 ID
+        int backup_port_id;                      // 此设备的备份端口 ID
+        
+        int num_eps_per_pe;
+        nvshmemi_ibgda_device_qp_map_type_t map_by;
+    } rc;
+```
 ### 2.1.2 实现备份映射逻辑
 在 `nvshmemt_init` 函数中，设备枚举完成后，添加备份映射创建函数调用。
 **新增函数 `ibgda_create_backup_mapping`**：
@@ -55,7 +71,6 @@ typedef struct {
   2. 检查每个设备的 `phys_port_cnt`：
      - 若 `== 1`：一卡一口，使用相邻配对策略（i 与 i^1 配对，即 0↔1, 2↔3, 4↔5, 6↔7）
      - 若 `== 2`：一卡两口，查找同一设备的另一端口
-
   3. 填充 `backup_dev_ids[]` 和 `backup_port_ids[]` 数组
   4. 对于无法找到备份的设备，记录警告日志
   
@@ -72,7 +87,6 @@ for i in 0..n_dev_ids:
             backup_dev_ids[i] = dev_ids[backup_idx]
             backup_port_ids[i] = port_ids[backup_idx]
 ```
-
 一卡两口:
 ```
 if device.phys_port_cnt == 2:
@@ -93,19 +107,60 @@ ibgda_state->backup_port_ids = (int *)malloc(MAX_NUM_PES_PER_NODE * sizeof(int))
 ibgda_state->is_single_port_card = (bool *)malloc(MAX_NUM_PES_PER_NODE * sizeof(bool));
 // 添加内存分配检查
 ```
-
 ### 2.1.4 调用备份映射函数
-
-在设备枚举完成后（约行 4874 "End - Ordered list of devices" 日志后），调用：
-
+在设备枚举完成后（约行End - Ordered list of devices" 日志后），调用：
 ```c
 status = ibgda_create_backup_mapping(ibgda_state);
 NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
                       "Failed to create backup QP mapping.\n");
 ```
-### 2.1.5 清理资源
-在 `out:` 标签的清理代码中，添加备份数组的释放：
+### 2.1.5 连接建立时
+在`ibgda_connect_device_resources`函数内按照如下逻辑去写每个设备的RC'结构体，就可以正确应用前面的全局的表backup_dev_ids和backup_port_ids到设备结构体内去。
+```cpp
+// Initialize backup device/port mapping based on ibgda_state backup mappings
+    int backup_mapping_idx = -1;
+    for (int j = 0; j < ibgda_state->n_dev_ids; j++) {
+        if (ibgda_state->dev_ids[j] == dev_idx && 
+            ibgda_state->port_ids[j] == portid) {
+            backup_mapping_idx = j;
+            break;
+        }
+    }
+    if (backup_mapping_idx != -1) {
+        // Set backup device and port information in the RC structure
+        device->rc.backup_dev_id = ibgda_state->backup_dev_ids[backup_mapping_idx];
+        device->rc.backup_port_id = ibgda_state->backup_port_ids[backup_mapping_idx];
+        INFO(ibgda_state->log_level,
+             "Device dev_idx=%d port=%d has backup: dev_id=%d port=%d",
+             dev_idx, portid, device->rc.backup_dev_id, device->rc.backup_port_id);
+    } else {
+        device->rc.backup_dev_id = -1;
+        device->rc.backup_port_id = -1;
+    }
+```
 
+### 2.1.6 backup RC端点创建函数
+`ibgda_connect_device_endpoints` 内创建backup的RC，
+```cpp
+// Phase 4: Per-device endpoint setup (cached)
+static int ibgda_connect_device_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
+                                          struct ibgda_device *device, int portid,
+                                          nvshmem_transport_t t) {
+	// ... setup DCT,DCI,RC
+	// Setup Backup RC endpoints
+    if (device->rc.backup_dev_id != -1) {
+        struct ibgda_device *backup_device = (struct ibgda_device *)ibgda_state->devices +
+                                                device->rc.backup_dev_id;
+        status = ibgda_setup_backup_rc_endpoints(ibgda_state, device, backup_device,
+                                                    device->rc.backup_port_id, t);
+        if (status) return status;
+    }
+  // ...
+```
+
+
+### 2.1.10 清理资源
+在 `out:` 标签的清理代码中，添加备份数组的释放：
 ```c
 if (ibgda_state) {
     if (ibgda_state->backup_dev_ids) free(ibgda_state->backup_dev_ids);
@@ -113,7 +168,6 @@ if (ibgda_state) {
     if (ibgda_state->is_single_port_card) free(ibgda_state->is_single_port_card);
 }
 ```
-
 ## 2.2 Check CQ status and checkout to backup QP
 
 
