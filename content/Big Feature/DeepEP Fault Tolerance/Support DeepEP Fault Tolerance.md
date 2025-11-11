@@ -115,6 +115,7 @@ NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
                       "Failed to create backup QP mapping.\n");
 ```
 ### 2.1.5 连接建立时
+#### a. 分配和初始化ibgda_device内备份device
 在`ibgda_connect_device_resources`函数内按照如下逻辑去写每个设备的RC'结构体，就可以正确应用前面的全局的表backup_dev_ids和backup_port_ids到设备结构体内去。
 ```cpp
 // Initialize backup device/port mapping based on ibgda_state backup mappings
@@ -130,6 +131,7 @@ NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
         // Set backup device and port information in the RC structure
         device->rc.backup_dev_id = ibgda_state->backup_dev_ids[backup_mapping_idx];
         device->rc.backup_port_id = ibgda_state->backup_port_ids[backup_mapping_idx];
+        status = ibgda_allocate_backup_rc_structures(t, device, num_rc_eps_per_pe * n_pes);
         INFO(ibgda_state->log_level,
              "Device dev_idx=%d port=%d has backup: dev_id=%d port=%d",
              dev_idx, portid, device->rc.backup_dev_id, device->rc.backup_port_id);
@@ -138,21 +140,44 @@ NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
         device->rc.backup_port_id = -1;
     }
 ```
-
-### 2.1.6 backup RC端点创建函数
-`ibgda_connect_device_endpoints` 内创建backup的RC，
+device内的rc内现在有了backup的设备和端口信息后，我们需要和主rc一样去allocate它的handle和backup_eps数组，参考 [[ibgda.cpp#a. 分配peer_ep_handles 数组 | 这里的解释]]。其中调用的 `ibgda_allocate_backup_rc_structures` 函数的逻辑就是同样根据是首次还是多次去alloc和realloc不同num_rc_eps的备份handle和备份eps，这里实现和`ibgda_allocate_rc_structures`类似。
+```cpp
+static int ibgda_allocate_backup_rc_structures(nvshmem_transport_t t, struct ibgda_device *device, int num_rc_eps) {
+    int status = 0;
+    if (device->backup_peer_ep_handles == NULL) {
+        device->rc.backup_peer_ep_handles =
+            (struct ibgda_rc_handle *)calloc(num_rc_eps, sizeof(*device->rc.backup_peer_ep_handles));
+    } else {
+        size_t new_size = device->rc.num_eps_per_pe * t->n_pes + num_rc_eps;
+        device->rc.backup_peer_ep_handles = (struct ibgda_rc_handle *)realloc(
+        device->rc.backup_peer_ep_handles, new_size * sizeof(*device->rc.backup_peer_ep_handles));
+    }
+	 if (device->rc.backup_eps == NULL) {
+			 device->rc.backup_eps = (struct ibgda_ep **)calloc(num_rc_eps, sizeof(*device->rc.backup_eps));
+	 } else {
+			 size_t new_size = device->rc.num_eps_per_pe * t->n_pes + num_rc_eps;
+			 device->rc.backup_eps =
+					 (struct ibgda_ep **)realloc(device->rc.backup_eps, new_size * sizeof(*device->rc.backup_eps));
+	 }
+    return status;
+}
+```
+#### b. 创建RC endpoint
+在主RC endpoint创建后立即创建backup rc endpoint。其中创建 [[ibgda.cpp#2.2 ibgda_setup_rc_endpoints|主RC endpoints的setup函数]]大致：
 ```cpp
 // Phase 4: Per-device endpoint setup (cached)
 static int ibgda_connect_device_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
                                           struct ibgda_device *device, int portid,
                                           nvshmem_transport_t t) {
-	// ... setup DCT,DCI,RC
-	// Setup Backup RC endpoints
+	 // ... setup DCT,DCI,RC
+	 // Setup RC endpoints
+    status = ibgda_setup_rc_endpoints(ibgda_state, device, portid, t,
+                                      ibgda_state->options->IBGDA_NUM_RC_PER_PE);
+    if (status) return status;
+	 // Setup Backup RC endpoints
     if (device->rc.backup_dev_id != -1) {
-        struct ibgda_device *backup_device = (struct ibgda_device *)ibgda_state->devices +
-                                                device->rc.backup_dev_id;
-        status = ibgda_setup_backup_rc_endpoints(ibgda_state, device, backup_device,
-                                                    device->rc.backup_port_id, t);
+        struct ibgda_device *backup_device = (struct ibgda_device *)ibgda_state->devices + device->rc.backup_dev_id;
+        status = ibgda_setup_backup_rc_endpoints(ibgda_state, device, backup_device, device->rc.backup_port_id, t);
         if (status) return status;
     }
   // ...

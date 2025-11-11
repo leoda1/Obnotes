@@ -63,6 +63,6 @@ struct ibv_qp {
 1. 创建多个QP
 2. 给这些QP分配和绑定CQ
 3. 初始化QP的属性（RESET->INIT）
-4. 和peer交换（bootstrap？？回头确定一下）连接信息（LID，GID，QPN）
+4. **和peer交换**（bootstrap？？回头确定一下）连接信息（LID，GID，QPN）
 5. 调用`ibv_modify_qp()` 把 QP 转入 RTR / RTS 状态
 6. 保存为`device->rc.eps[i]` 数组（每个 peer 一个 endpoint）
