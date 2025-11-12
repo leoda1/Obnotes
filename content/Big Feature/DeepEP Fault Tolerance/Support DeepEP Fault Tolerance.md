@@ -141,6 +141,7 @@ NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
     }
 ```
 device内的rc内现在有了backup的设备和端口信息后，我们需要和主rc一样去allocate它的handle和backup_eps数组，参考 [[ibgda.cpp#a. 分配peer_ep_handles 数组 | 这里的解释]]。其中调用的 `ibgda_allocate_backup_rc_structures` 函数的逻辑就是同样根据是首次还是多次去alloc和realloc不同num_rc_eps的备份handle和备份eps，这里实现和`ibgda_allocate_rc_structures`类似。
+不同的是：这里我们需要增加的是device->rc.num_backup_eps_per_pe这个变量去单独计数，原来allocate rc的函数内用的是device->rc.num_eps_per_pe，需要单独计数，不然创建endpoint的时候backup rc会直接用主rc的计数，直接把handle和eps写在了主的后面，主的拓展的时候就乱了。
 ```cpp
 static int ibgda_allocate_backup_rc_structures(nvshmem_transport_t t, struct ibgda_device *device, int num_rc_eps) {
     int status = 0;
@@ -148,22 +149,20 @@ static int ibgda_allocate_backup_rc_structures(nvshmem_transport_t t, struct ibg
         device->rc.backup_peer_ep_handles =
             (struct ibgda_rc_handle *)calloc(num_rc_eps, sizeof(*device->rc.backup_peer_ep_handles));
     } else {
-        size_t new_size = device->rc.num_eps_per_pe * t->n_pes + num_rc_eps;
-        device->rc.backup_peer_ep_handles = (struct ibgda_rc_handle *)realloc(
-        device->rc.backup_peer_ep_handles, new_size * sizeof(*device->rc.backup_peer_ep_handles));
+        size_t new_size = device->rc.num_backup_eps_per_pe * t->n_pes + num_rc_eps;
+        device->rc.backup_peer_ep_handles = (struct ibgda_rc_handle *)realloc(device->rc.backup_peer_ep_handles, new_size * sizeof(*device->rc.backup_peer_ep_handles));
     }
 	 if (device->rc.backup_eps == NULL) {
-			 device->rc.backup_eps = (struct ibgda_ep **)calloc(num_rc_eps, sizeof(*device->rc.backup_eps));
+		 device->rc.backup_eps = (struct ibgda_ep **)calloc(num_rc_eps, sizeof(*device->rc.backup_eps));
 	 } else {
-			 size_t new_size = device->rc.num_eps_per_pe * t->n_pes + num_rc_eps;
-			 device->rc.backup_eps =
-					 (struct ibgda_ep **)realloc(device->rc.backup_eps, new_size * sizeof(*device->rc.backup_eps));
-	 }
+		 size_t new_size = device->rc.num_backup_eps_per_pe * t->n_pes + num_rc_eps;
+		 device->rc.backup_eps = (struct ibgda_ep **)realloc(device->rc.backup_eps, new_size * sizeof(*device->rc.backup_eps));
+ }
     return status;
 }
 ```
 #### b. 创建RC endpoint
-在主RC endpoint创建后立即创建backup rc endpoint。其中创建 [[ibgda.cpp#2.2 ibgda_setup_rc_endpoints|主RC endpoints的setup函数]]大致：
+在Phase 4的`ibgda_connect_device_endpoints`内，主RC endpoint创建后立即创建backup rc endpoint。
 ```cpp
 // Phase 4: Per-device endpoint setup (cached)
 static int ibgda_connect_device_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
@@ -182,6 +181,13 @@ static int ibgda_connect_device_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
     }
   // ...
 ```
+`ibgda_setup_backup_rc_endpoints` 实现参考 [[ibgda.cpp#2.2 ibgda_setup_rc_endpoints|主RC endpoints的setup函数]]的逻辑实现。
+
+#### c. GPU状态设置
+在上面的ep创建完毕之后，接下来nvshmemt_ibgda_connect_endpoints的phase 5就是ibgda_setup_gpu_state。在这个函数内我们需要修改一些函数来让备份RC和备份QP能正常发数据：
+* ibgda_setup_rc_gpu_state 计算backup RC的handle数量，分配设备上真实的内存，分配
+* ibgda_populate_rc_gpu_data填充backup QP的设备信息，关联CQ等等
+* ibgda_post_gpu_device_state添加备份 QP 数组指针到设备状态
 
 
 ### 2.1.10 清理资源

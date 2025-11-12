@@ -122,7 +122,7 @@ graph TB
 ```cpp
 static int ibgda_allocate_rc_structures(nvshmem_transport_t t, struct ibgda_device *device, int num_rc_eps) {
     int n_pes = t->n_pes;  // 总进程数
-    // 1. 分配 peer_ep_handles 数组
+    // a. 分配 peer_ep_handles 数组
 	if (device->rc.peer_ep_handles == NULL) {
         // 首次分配：直接 calloc
         device->rc.peer_ep_handles =
@@ -133,7 +133,7 @@ static int ibgda_allocate_rc_structures(nvshmem_transport_t t, struct ibgda_devi
         device->rc.peer_ep_handles = (struct ibgda_rc_handle *)realloc(
             device->rc.peer_ep_handles, new_size * sizeof(*device->rc.peer_ep_handles));
     }
-    // 2. 分配 eps 数组
+    // b. 分配 eps 数组
     if (device->rc.eps == NULL) {
         // 首次分配
         device->rc.eps = (struct ibgda_ep **)calloc(num_rc_eps, sizeof(*device->rc.eps));
@@ -166,4 +166,57 @@ struct ibgda_rc_handle {
 	* 缓冲区
 	* send和recv的CQ
 
-## 2.2 ibgda_setup_rc_endpoints
+### 2.2 ibgda_setup_rc_endpoints
+创建并配置主RC队列对，是RDMA连接的核心逻辑。
+```cpp
+static int ibgda_setup_rc_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
+                                    struct ibgda_device *device, int portid, 
+									nvshmem_transport_t t, int num_eps_per_pe) {
+	/* allocate local RC handles start */
+    local_rc_handles = (struct ibgda_rc_handle *)calloc(num_rc_eps, sizeof(*local_rc_handles));
+    /* a. 创建RC QP Pairs（create and assign RCs start） */
+    for (int i = 0; i < num_eps_per_pe; ++i) {
+        for (int j = 0; j < n_pes; ++j) {
+            // Do not create loopback to self
+            int dst_pe = (i * n_pes + 1 + mype + j) % n_pes;
+            if (dst_pe == mype) continue; // skip myself
+            int mapped_i = rc_first_index + i * n_pes + dst_pe;
+            int local_mapped_i = i + num_eps_per_pe * dst_pe;
+		    ibgda_create_qp(ibgda_state, &device->rc.eps[mapped_i], device, portid, mapped_i, NVSHMEMI_IBGDA_DEVICE_QP_TYPE_RC);
+            ibgda_get_rc_handle(&local_rc_handles[local_mapped_i],
+                                         device->rc.eps[mapped_i], device);
+    }
+    /* b. 交换连接信息 */
+    status = t->boot_handle->alltoall(
+	    (void *)local_rc_handles,                          // 发送：本地创建的QP信息
+    (void *)(device->rc.peer_ep_handles + rc_first_index), // 接收：远程QP信息
+    sizeof(*local_rc_handles) * num_eps_per_pe,
+    t->boot_handle
+	);
+	/* c. QP 状态转换 */
+	for (int i = 0; i < num_eps_per_pe; ++i) {
+		for (int j = 0; j < n_pes; ++j) {
+			int ep_index = rc_first_index + i * n_pes + j;
+			int peer_handle_index = rc_first_index + num_eps_per_pe * j + i;
+			// No loopback to self
+			if (j == mype) {
+				continue;
+			}
+			// 1️⃣ RST → INIT: 基本参数配置
+	        status = ibgda_qp_rst2init(device->rc.eps[ep_index], device, portid);
+	        // 2️⃣ INIT → RTR: 连接到远端（使用对方的QPN/LID/GID）
+	        status = ibgda_rc_init2rtr(ibgda_state, device->rc.eps[ep_index], device, portid, &device->rc.peer_ep_handles[peer_handle_index]);
+	        // 3️⃣ RTR → RTS: 设置重传/超时参数，允许发送数据
+	        status = ibgda_qp_rtr2rts(device->rc.eps[ep_index], device, portid);
+		}
+	}
+}
+```
+#### a. 创建RC QP Pairs
+* 两个for loop相当于每个rank/PE之间是全连接的，除了自己跟自己。那么单个rank就需要和其他所有rank建立n - 1条连接，就是变量 `num_eps_per_pe`。
+* 在device上的每个eps(endpoints)上创建QP。
+* 每个发送端自己有自己的RC连接的本地handle用于下面alltoall交换节点的句柄信息。
+#### b. alltoall交换连接信息
+RC是点对点的，需要知道对端的QPN，且需要全局所有rank都完成QP创建后才进行状态的转换。
+#### c. QP 状态转换
+使用对等节点的句柄信息来初始化本地 RC 连接
