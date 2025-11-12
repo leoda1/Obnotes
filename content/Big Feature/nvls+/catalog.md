@@ -23,7 +23,7 @@ tree allreduce:
 ![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20250930204823052.png)
 nvls allreduce:
 Sylvain Jeaugey对nvls的解释很简短，具体的原理并没有在文中说明。支持NVSwitch上支持sharp的包括nvls和nvls tree，都是Simple协议。其中nvls的大致图例如下：
-![[catalog 2025-09-30 20.50.39.excalidraw|100%]]
+![[catalog 2025-09-30 20.50.39.excalidraw.md|100%]]
  NVLS的规约走CollNet和sharp switch，然后NVLS Tree走fan-out。具体的如下:
 * CollnetDirect is alltoall within the node and Collnet between nodes.
 * CollnetChain is a chain within the node and Collnet between nodes.
