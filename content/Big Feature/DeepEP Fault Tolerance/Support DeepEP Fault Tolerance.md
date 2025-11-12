@@ -185,9 +185,10 @@ static int ibgda_connect_device_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
 
 #### c. GPU状态设置
 在上面的ep创建完毕之后，接下来nvshmemt_ibgda_connect_endpoints的phase 5就是ibgda_setup_gpu_state。在这个函数内我们需要修改一些函数来让备份RC和备份QP能正常发数据：
-* ibgda_setup_rc_gpu_state 计算backup RC的handle数量，分配设备上真实的内存，分配
+* ibgda_setup_rc_gpu_state 计算backup RC的handle数量，分配设备上真实的内存，分配backup_rc_h和backup_rc_d。
 * ibgda_populate_rc_gpu_data填充backup QP的设备信息，关联CQ等等
 * ibgda_post_gpu_device_state添加备份 QP 数组指针到设备状态
+
 
 
 ### 2.1.10 清理资源
@@ -203,3 +204,7 @@ if (ibgda_state) {
 
 
 ## 2.3 Checkout to normal QP
+
+# 3. uni-test
+在
+
