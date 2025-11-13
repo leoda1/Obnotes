@@ -1,6 +1,7 @@
 # 0 Base
 git clone DeepEP/nvshmem，然后把deepEP下面的third-party内的nvshmem.patch的改动加到自己的nvshmem上。
-## 0.1 Compile NVSHMEM
+## 0.1 Compile and Test NVSHMEM
+### compile
 这里的-DNVSHMEM_BUILD_PYTHON_LIB=OFF一定需要设置。
 ```shell
 CUDA_HOME=/usr/local/cuda/ && \
@@ -15,6 +16,24 @@ cmake -S . -B build/  -DCUDA_ARCHITECTURES=90 -DCMAKE_VERBOSE_MAKEFILE=ON -DCMAK
 cd build
 make -j$(nproc)
 ```
+1. **编译如果出现mlx5找不到：**
+```shell
+ln -s /usr/lib/x86_64-linux-gnu/libmlx5.so.1 /usr/lib/x86_64-linux-gnu/libmlx5.so
+```
+2. **如果显示nvshmem.cpp找不到**：
+```shell
+# 需要git status看一下是不是当前有些文件被nvshmem里面乱七八糟的cmake弄没了
+# 这个nvshmem.cpp就会被莫名其妙删掉 有时候需要手动restore一下
+```
+### test
+nvshmem/src/modules/transport/common/env_defs.h内有一些环境变量说明
+
+```shell
+export NVSHMEM_DIR=/workspace/liuda/dev/nvshmem-fault-tolerance  # Use for DeepEP installation
+export LD_LIBRARY_PATH="${NVSHMEM_DIR}/lib:$LD_LIBRARY_PATH"
+export PATH="${NVSHMEM_DIR}/bin:$PATH"
+```
+
 ## 0.2 Compile  DeepEP
 这里需要export TORCH_CUDA_ARCH_LIST="9.0" 不然会出问题。
 ```shell
@@ -23,6 +42,14 @@ export LD_LIBRARY_PATH="${NVSHMEM_DIR}/lib:$LD_LIBRARY_PATH"
 export PATH="${NVSHMEM_DIR}/bin:$PATH"
 export TORCH_CUDA_ARCH_LIST="9.0"
 NVSHMEM_DIR=/opt/nvshmem python setup.py build
+```
+test
+```shell
+MASTER_ADDR=gpu064 MASTER_PORT=29500 WORLD_SIZE=2 RANK=0 \
+python /workspace/liuda/dev/DeepEP/tests/test_internode.py
+
+MASTER_ADDR=gpu064 MASTER_PORT=29500 WORLD_SIZE=2 RANK=1 \
+python /workspace/liuda/dev/DeepEP/tests/test_internode.py
 ```
 # 1 Related
 a. 在DeepEP的[[internode_ll.cu]]内包含了dispatch和combine，二者内使用了nvshmemi_ibgda_put_nbi_warp来通信，以及nvshmemi_ibgda_amo_nonfetch_add给remote进程加原子计数的原理。
@@ -34,6 +61,58 @@ c. 具体的传输在NVSHMEM的[[ibgda.cpp]]内实现。
 - **一卡一口**：相邻网卡互备（mlx5_0↔mlx5_1, mlx5_2↔mlx5_3, mlx5_4↔mlx5_5, mlx5_6↔mlx5_7）
 - **一卡两口**：同一网卡的两个端口互备
 - 建backup QP，CQ等等
+
+```mermaid
+---
+config:
+  theme: 'neutral'
+---
+graph LR
+    subgraph HostNode[计算节点]
+        App[训练框架 / 专家路由层]
+        CommAbstraction[GPU 通信抽象层]
+        IBGDA[IBGDA 传输层]
+
+        subgraph GPUblk[GPU 侧]
+            GPU[GPU / SMs]
+            DevState[IBGDA 设备状态镜像<br/>主 RC / 备份 RC / 健康状态]
+        end
+
+        subgraph NICblk[网卡与端口]
+            subgraph NIC0[网卡 0]
+                P0_0[端口 0（主或备通道）]
+                P0_1[端口 1（双口卡互备）]
+            end
+            subgraph NIC1[网卡 1]
+                P1_0[端口 0（单口卡互备）]
+                P1_1[端口 1]
+            end
+        end
+    end
+
+    subgraph Remote[远端节点（抽象）]
+        RGPU[远端 GPU]
+        RNIC[远端网卡和端口]
+    end
+
+    App --> CommAbstraction --> IBGDA
+    IBGDA -->|初始化：设备枚举<br/>主备映射 f_backup| NICblk
+
+    App -. dispatch / combine 调用 .-> CommAbstraction
+    CommAbstraction -->|GPU 端通信请求| GPU
+    GPU -->|查询设备状态| DevState
+
+    DevState -->|根据健康状态选择<br/>主 RC 或备份 RC| IBGDA
+
+    IBGDA -->|主通道 RC QP| P0_0
+    IBGDA -->|备份通道 RC QP| P1_0
+
+    P0_0 -. 主 RC 传输 .-> RNIC
+    P1_0 -. 备份 RC 传输 .-> RNIC
+
+    RNIC --> RGPU
+```
+
 ![[Support DeepEP Fault Tolerance 2025-11-10 21.03.35.excalidraw  | 100%]]
 ### 2.1.1 扩展数据结构
 在 `nvshmemt_ibgda_state_t` 结构体添加备份QP字段：
@@ -207,4 +286,3 @@ if (ibgda_state) {
 
 # 3. uni-test
 在
-
