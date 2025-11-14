@@ -301,6 +301,7 @@ if (*regBufFlag) {
       *peerRmtAddrsOut = peerRmtAddrs;
     }
 ```
+
 ## 4. summary
 handle是**物理内存的标识符**，在 CUDA 统一内存管理中，物理内存和虚拟地址是分离的。
 * **File Descriptor(FD)**：利用 Linux 内核的文件描述符机制，可以跨进程传递
@@ -322,4 +323,3 @@ cuMemImportFromShareableHandle(&newHandle, &impFd, CU_MEM_HANDLE_TYPE_POSIX_FILE
 2. rank2 在自己的虚拟地址空间B中创建映射 [regAddr]
 3. [rmtRegAddr] 就是 rank2 进程中指向 rank1 内存的虚拟地址A
 4. rank1 告诉rank2："要访问我的内存，请使用 rank2 进程中的地址 [rmtRegAdd]
-## 5. nccl-test的-R 1在IpcRegisterBuffer内的表现
