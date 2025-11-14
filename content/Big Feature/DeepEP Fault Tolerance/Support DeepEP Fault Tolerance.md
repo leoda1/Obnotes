@@ -4,17 +4,32 @@ git clone DeepEP/nvshmem，然后把deepEP下面的third-party内的nvshmem.patc
 ### compile
 这里的-DNVSHMEM_BUILD_PYTHON_LIB=OFF一定需要设置。
 ```shell
-CUDA_HOME=/usr/local/cuda/ && \
+export CUDA_HOME=/usr/local/cuda
+export MPI_HOME=/usr/local/mpi
+export CPATH=/usr/local/mpi/include:$CPATH
+export LIBRARY_PATH=/usr/local/mpi/lib:$LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/mpi/lib:$LD_LIBRARY_PATH
+MPI_HOME=$MPI_HOME \
+CUDA_HOME=$CUDA_HOME \
 NVSHMEM_SHMEM_SUPPORT=0 \
 NVSHMEM_UCX_SUPPORT=0 \
 NVSHMEM_USE_NCCL=0 \
 NVSHMEM_IBGDA_SUPPORT=1 \
 NVSHMEM_PMIX_SUPPORT=0 \
-NVSHMEM_MPI_SUPPORT=0 \
-NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
-cmake -S . -B build/  -DCUDA_ARCHITECTURES=90 -DCMAKE_VERBOSE_MAKEFILE=ON -DCMAKE_INSTALL_PREFIX=/opt/nvshmem -DNVSHMEM_BUILD_PYTHON_LIB=OFF && \
-cd build
-make -j$(nproc)
+NVSHMEM_MPI_SUPPORT=1 \
+NVSHMEM_IBDEVX_SUPPORT=1 \
+NVSHMEMTEST_MPI_SUPPORT=1 \
+NVSHMEM_USE_GDRCOPY=1 \
+cmake -G Ninja -S . -B build \
+  -DCMAKE_C_COMPILER=${MPI_HOME}/bin/mpicc \
+  -DCMAKE_CXX_COMPILER=${MPI_HOME}/bin/mpicxx \
+  -DMPI_HOME=${MPI_HOME} \
+  -DCMAKE_INSTALL_PREFIX=/workspace/liuda/output/nvshmem \
+  -DCUDA_ARCHITECTURES=90 \
+  -DNVSHMEM_BUILD_EXAMPLES=OFF \
+  -DNVSHMEM_BUILD_PYTHON_LIB=OFF
+
+cmake --build build --target install -- -j 80
 ```
 1. **编译如果出现mlx5找不到：**
 ```shell
@@ -25,15 +40,26 @@ ln -s /usr/lib/x86_64-linux-gnu/libmlx5.so.1 /usr/lib/x86_64-linux-gnu/libmlx5.s
 # 需要git status看一下是不是当前有些文件被nvshmem里面乱七八糟的cmake弄没了
 # 这个nvshmem.cpp就会被莫名其妙删掉 有时候需要手动restore一下
 ```
+3. **如果出现nvidia_peermem找不到的问题**：
+```cpp
+# 检查ofed的驱动是不是加载了旧的默认nv_peer_mem，是的话关闭旧的 打开新的nvidia_peermem模块
+rmmod nv_peer_mem && modprobe nvidia_peermem
+```
+4. **nvshmem的example编译的时候有问题**
+直接加上下面这个
+```shell
+-DNVSHMEM_BUILD_EXAMPLES=OFF \
+```
+5. **NVSHMEM_MPI_SUPPORT打开后需要全方位给cmake指定mpi的路径，参考我的完整编译指令 这里不开MPI SUPPORT测试nvshmem的perftest就会各种报错找不到第二个process**
+6. **DNVSHMEM_BUILD_PYTHON_LIB这个也必须得关掉**
+7. 
 ### test
 nvshmem/src/modules/transport/common/env_defs.h内有一些环境变量说明
-
 ```shell
 export NVSHMEM_DIR=/workspace/liuda/dev/nvshmem-fault-tolerance  # Use for DeepEP installation
 export LD_LIBRARY_PATH="${NVSHMEM_DIR}/lib:$LD_LIBRARY_PATH"
 export PATH="${NVSHMEM_DIR}/bin:$PATH"
 ```
-
 ## 0.2 Compile  DeepEP
 这里需要export TORCH_CUDA_ARCH_LIST="9.0" 不然会出问题。
 ```shell
@@ -44,6 +70,7 @@ export TORCH_CUDA_ARCH_LIST="9.0"
 NVSHMEM_DIR=/opt/nvshmem python setup.py build
 ```
 test
+在不同机器上跑下面的指令
 ```shell
 MASTER_ADDR=gpu064 MASTER_PORT=29500 WORLD_SIZE=2 RANK=0 \
 python /workspace/liuda/dev/DeepEP/tests/test_internode.py
