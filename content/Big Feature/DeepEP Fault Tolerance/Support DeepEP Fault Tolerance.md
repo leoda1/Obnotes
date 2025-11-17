@@ -52,7 +52,6 @@ rmmod nv_peer_mem && modprobe nvidia_peermem
 ```
 5. **NVSHMEM_MPI_SUPPORT打开后需要全方位给cmake指定mpi的路径，参考我的完整编译指令 这里不开MPI SUPPORT测试nvshmem的perftest就会各种报错找不到第二个process**
 6. **DNVSHMEM_BUILD_PYTHON_LIB这个也必须得关掉**
-7. 
 ### test
 nvshmem/src/modules/transport/common/env_defs.h内有一些环境变量说明
 ```shell
@@ -165,12 +164,26 @@ struct {
         struct ibgda_rc_handle *backup_peer_ep_handles; // 备份 RC 对等句柄
         int backup_dev_id;                       // 此设备的备份设备 ID
         int backup_port_id;                      // 此设备的备份端口 ID
-        
-        int num_eps_per_pe;
+        int num_backup_eps_per_pe;               // 每个PE的备份端点数量
         nvshmemi_ibgda_device_qp_map_type_t map_by;
     } rc;
 ```
-### 2.1.2 实现备份映射逻辑
+为每个设备添加备份端点相关字段，用于存储备份 QP 信息：
+```cpp
+struct nvshmemt_ibgda_device_state_cache {
+	nvshmemi_ibgda_device_cq_t *backup_cq_h;  // 备份 CQ 句柄
+	nvshmemi_ibgda_device_qp_t *backup_rc_h;  // 备份 RC QP 句柄
+}
+```
+### 2.1.2 分配和初始化备份数组
+在 `nvshmemt_init` 中，在 `ibgda_state` 分配后，分配备份映射数组内存
+```c
+// 在 ibgda_state 字段赋值处添加
+ibgda_state->backup_dev_ids = (int *)malloc(MAX_NUM_PES_PER_NODE * sizeof(int));
+ibgda_state->backup_port_ids = (int *)malloc(MAX_NUM_PES_PER_NODE * sizeof(int));
+ibgda_state->is_single_port_card = (bool *)malloc(MAX_NUM_PES_PER_NODE * sizeof(bool));
+```
+### 2.1.3 实现备份映射逻辑
 在 `nvshmemt_init` 函数中，设备枚举完成后，添加备份映射创建函数调用。
 **新增函数 `ibgda_create_backup_mapping`**：
   1. 遍历所有已枚举的设备（`ibgda_state->n_dev_ids`）
@@ -203,25 +216,8 @@ if device.phys_port_cnt == 2:
             backup_port_ids[i] = port_ids[j]
             break
 ```
-
-### 2.1.3 分配和初始化备份数组
-在 `nvshmemt_init` 中，在 `ibgda_state` 分配后：
-```c
-// 在 ibgda_state 字段赋值处添加
-ibgda_state->backup_dev_ids = (int *)malloc(MAX_NUM_PES_PER_NODE * sizeof(int));
-ibgda_state->backup_port_ids = (int *)malloc(MAX_NUM_PES_PER_NODE * sizeof(int));
-ibgda_state->is_single_port_card = (bool *)malloc(MAX_NUM_PES_PER_NODE * sizeof(bool));
-// 添加内存分配检查
-```
-### 2.1.4 调用备份映射函数
-在设备枚举完成后（约行End - Ordered list of devices" 日志后），调用：
-```c
-status = ibgda_create_backup_mapping(ibgda_state);
-NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
-                      "Failed to create backup QP mapping.\n");
-```
-### 2.1.5 连接建立时
-#### a. 分配和初始化ibgda_device内备份device
+### 2.1.4 连接建立时
+#### a. 设置备份设备ID、备份端口ID和备份RC结构
 在`ibgda_connect_device_resources`函数内按照如下逻辑去写每个设备的RC'结构体，就可以正确应用前面的全局的表backup_dev_ids和backup_port_ids到设备结构体内去。
 ```cpp
 // Initialize backup device/port mapping based on ibgda_state backup mappings
@@ -246,8 +242,9 @@ NVSHMEMI_NZ_ERROR_JMP(status, NVSHMEMX_ERROR_INTERNAL, out,
         device->rc.backup_port_id = -1;
     }
 ```
-device内的rc内现在有了backup的设备和端口信息后，我们需要和主rc一样去allocate它的handle和backup_eps数组，参考 [[ibgda.cpp#a. 分配peer_ep_handles 数组 | 这里的解释]]。其中调用的 `ibgda_allocate_backup_rc_structures` 函数的逻辑就是同样根据是首次还是多次去alloc和realloc不同num_rc_eps的备份handle和备份eps，这里实现和`ibgda_allocate_rc_structures`类似。
-不同的是：这里我们需要增加的是device->rc.num_backup_eps_per_pe这个变量去单独计数，原来allocate rc的函数内用的是device->rc.num_eps_per_pe，需要单独计数，不然创建endpoint的时候backup rc会直接用主rc的计数，直接把handle和eps写在了主的后面，主的拓展的时候就乱了。
+device内的rc内现在有了backup的设备和端口信息后，我们需要和主rc一样去allocate它的handles数据和端点数组，参考 [[ibgda.cpp#a. 分配peer_ep_handles 数组 | 这里的解释]]。
+`ibgda_allocate_backup_rc_structures` 函数的逻辑就是同样根据是首次还是多次去alloc和realloc不同num_rc_eps的备份handle和备份eps，这里实现和`ibgda_allocate_rc_structures`类似。
+不同的是：这里我们需要增加的是device->rc.num_backup_eps_per_pe这个变量去单独计数，原来allocate RC的函数内用的是device->rc.num_eps_per_pe，需要单独计数，不然创建endpoint的时候backup rc会直接用主rc的计数，直接把handle和eps写在了主的后面，主的拓展的时候就乱了。
 ```cpp
 static int ibgda_allocate_backup_rc_structures(nvshmem_transport_t t, struct ibgda_device *device, int num_rc_eps) {
     int status = 0;

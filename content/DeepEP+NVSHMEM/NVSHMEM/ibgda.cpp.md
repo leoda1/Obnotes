@@ -220,3 +220,6 @@ static int ibgda_setup_rc_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
 RC是点对点的，需要知道对端的QPN，且需要全局所有rank都完成QP创建后才进行状态的转换。
 #### c. QP 状态转换
 使用对等节点的句柄信息来初始化本地 RC 连接
+
+### 2.3 ibgda_populate_rc_gpu_data
+	
