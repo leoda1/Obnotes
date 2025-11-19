@@ -233,9 +233,123 @@ static int ibgda_setup_rc_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
 RC是点对点的，需要知道对端的QPN，且需要全局所有rank都完成QP创建后才进行状态的转换。
 #### c. QP 状态转换
 使用对等节点的句柄信息来初始化本地 RC 连接
+### 设置GPU state，以下
 ### 2.3 ibgda_setup_rc_gpu_state
+该函数只负责容量规划和内存就绪，不写到实际的QP/CQ数据内。在后面ibgda_populate_rc_gpu_data和ibgda_copy_rc_gpu_data才真正填充。
+```cpp
+static int ibgda_setup_rc_gpu_state(nvshmemt_ibgda_state_t *ibgda_state, nvshmem_transport_t t,
+                                    int *num_rc_handles, nvshmemi_ibgda_device_qp_t **rc_h,
+                                    nvshmemi_ibgda_device_qp_t **rc_d) {
+    ......
+    for (int j = 0; j < n_devs_selected; j++) {
+        int dev_idx = ibgda_state->selected_dev_ids[j];
+        struct ibgda_device *device = (struct ibgda_device *)ibgda_state->devices + dev_idx;
+        *num_rc_handles += device->rc.num_eps_per_pe * n_pes;
+    }
+    if (*num_rc_handles > 0) {
+        if (*rc_h == NULL) {
+            *rc_h = (nvshmemi_ibgda_device_qp_t *)calloc(*num_rc_handles, sizeof(**rc_h));
+        } else {
+            *rc_h = (nvshmemi_ibgda_device_qp_t *)realloc(*rc_h, *num_rc_handles * sizeof(**rc_h));
+        }
+        for (int i = ibgda_state->last_num_rcs; i < *num_rc_handles; i++) {
+            TRACE(ibgda_state->log_level, "Initializing RC at index #%d", i);
+            nvshmemi_init_ibgda_device_qp((*rc_h)[i]);
+        }
+    }
+    if (*num_rc_handles > 0) {
+        if (*rc_d != NULL) {
+            status = cudaMalloc(&rc_d_temp, *num_rc_handles * sizeof(**rc_d));
+            cudaMemcpyAsync(rc_d_temp, *rc_d, ibgda_state->last_num_rcs * sizeof(**rc_d), cudaMemcpyDeviceToDevice, ibgda_state->my_stream);
+            cudaStreamSynchronize(ibgda_state->my_stream);
+            cudaFree(*rc_d);
+            *rc_d = rc_d_temp;
+        } else {
+            status = cudaMalloc(rc_d, *num_rc_handles * sizeof(**rc_d));
+        }
+    return status;
+}
 
+```
+* 先for loop，对每个选中的NIC的每个device->rc.num_eps_per_pe乘PE数量(n_pes)得出总的RC handle数量。
+* Host侧：开始分配nvshmemi_ibgda_device_qp_t结构的rc_h
+* Device侧：开始分配rc_d
 ### 2.4 ibgda_populate_rc_gpu_data
+把host创建好的RC QP/CQ/XRC写入连续的GPU数组内，并把最终的cq_idx写回上层。
+```cpp
+static int ibgda_populate_rc_gpu_data(nvshmemt_ibgda_state_t *ibgda_state, nvshmem_transport_t t, nvshmemi_ibgda_device_qp_t *rc_h, nvshmemi_ibgda_device_qp_t *rc_d, nvshmemi_ibgda_device_cq_t *cq_h, nvshmemi_ibgda_device_cq_t *cq_d, int num_rc_handles, int *cq_index) {
+	for (int i = 0; i < n_devs_selected; i++) {
+		int dev_idx = ibgda_state->selected_dev_ids[i];
+		struct ibgda_device *device = (struct ibgda_device *)ibgda_state->devices + dev_idx;
+		for (int j = 0; j < device->rc.num_eps_per_pe * n_pes; j++) {
+			num_rc_handles_populated++;
+			if (j % n_pes == mype) {
+				cq_idx += 2;
+				continue;
+			}
+			int ep_index = device->rc.num_eps_per_pe * i + j;
+			ibgda_ep *ep = device->rc.eps[ep_index];
+			int qp_index = ep->user_index;
+			uintptr_t base_mvars_d_addr = (uintptr_t)(&rc_d[qp_index]) + mvars_offset;
+			ibgda_get_device_qp(ibgda_state, &rc_h[qp_index], device, ep, ep_index, i);
+
+			rc_h[qp_index].tx_wq.cq = &cq_d[cq_idx];
+			ibgda_get_device_cq(&cq_h[cq_idx], ep->send_cq);
+			cq_h[cq_idx].cons_idx = (uint64_t *)(base_mvars_d_addr + cons_t_offset);
+			cq_h[cq_idx].resv_head = (uint64_t *)(base_mvars_d_addr + wqe_h_offset);
+			cq_h[cq_idx].ready_head = (uint64_t *)(base_mvars_d_addr + wqe_t_offset);
+			cq_h[cq_idx].qpn = rc_h[qp_index].qpn;
+			cq_h[cq_idx].qp_type = rc_h[qp_index].qp_type;
+			rc_h[qp_index].tx_wq.prod_idx = (uint64_t *)(base_mvars_d_addr + prod_idx_offset);
+			cq_h[cq_idx].prod_idx = (uint64_t *)(base_mvars_d_addr + prod_idx_offset);
+			cq_idx++;
+
+			rc_h[qp_index].rx_wq.cq = &cq_d[cq_idx];
+			ibgda_get_device_cq(&cq_h[cq_idx], ep->recv_cq);
+			cq_h[cq_idx].resv_head = (uint64_t *)(base_mvars_d_addr + rx_resv_head_offset);
+			cq_h[cq_idx].cons_idx = (uint64_t *)(base_mvars_d_addr + rx_cons_offset);
+			cq_h[cq_idx].qpn = rc_h[qp_index].qpn;
+			cq_h[cq_idx].qp_type = rc_h[qp_index].qp_type;
+			cq_idx++;
+		}
+	}
+}
+```
+* double for loop，遍历所有NIC设备，处理每个device内的`device->rc.num_eps_per_pe * n_pes`的每一条RC连接。对于自己而言不需要QP，就直接给CQ索引+=2，消耗掉send和recv两个entry。
+* 获取EP和QP的index，调用ibgda_get_device_qp把host侧的 ibverbs/DEVX 的指针、DBR、blue flame 等信息拷贝到 rc_h[qp_index]，同时 rc_d 对应位置也会被异步 memcpy。
+* 建立 CQ ↔ mvars 的映射：通过 offsetof 计算 mvars 中生产者/消费者索引的设备地址（base_mvars_d_addr + prod_idx_offset 等），把 send/recv CQ 里的 prod_idx/cons_idx/resv_head/ready_head 指针全部指向 QP 自己的管理变量。这样 GPU 端在轮询 CQ 时就能直接读写这些索引。
+* 发送队列CQ配置，rc_h[qp_index].tx_wq.cq = &cq_d[cq_idx]，**ibgda_get_device_cq 将 host cq 描述写入 cq_h[cq_idx]，设置cons_idx/resv_head/ready_head/prod_idx指针** ，具体这些指针干嘛的参考 [[ibgda.cpp#3.1 nvshmemi_ibgda_device_cq_t | cq struct]]。收端同理。
+* 每完成一次代码就num_rc_handles_populated++，最后assert(num_rc_handles_populated == num_rc_handles);
+### 2.5 ibgda_copy_rc_gpu_data
+把前面在host端rc_h内组装好的结构批量拷贝到GPU的rc_d，并维护一个增量，避免搬重复的数据。
+```cpp
+static int ibgda_copy_rc_gpu_data(nvshmemt_ibgda_state_t *ibgda_state, nvshmemi_ibgda_device_qp_t *rc_h, nvshmemi_ibgda_device_qp_t *rc_d, int num_rc_handles) {
+    int num_rc_handles_to_copy = num_rc_handles - ibgda_state->last_num_rcs;
+    nvshmemi_ibgda_device_qp_t *rc_copy_start = rc_d + ibgda_state->last_num_rcs;
+    nvshmemi_ibgda_device_qp_t *rc_host_copy_start = rc_h + ibgda_state->last_num_rcs;
+
+    if (num_rc_handles > 0) {
+        status = cudaMemcpyAsync(rc_copy_start, 
+							     (const void *)rc_host_copy_start,
+							     sizeof(*rc_h) * num_rc_handles_to_copy, 
+							     cudaMemcpyHostToDevice,
+							     ibgda_state->my_stream);
+    }
+    ibgda_state->last_num_rcs = num_rc_handles;
+    return status;
+}
+```
+* 计算当前这一次拷贝的数量：num_rc_handles_to_copy = num_rc_handles - ibgda_state->last_num_rcs，也就是只拷新增的那一段（RC 构建是累加式的，不重复写旧数据）。
+* 通过指针偏移量last_num_rcs在源地址rc_h和目标地址rc_d后面一一对应的拷贝。
+* 假如有rc handle进来用cudaMemcpyAsync（H2D）拷贝。
+### 2.6 ibgda_setup_cq_gpu_state
+给所有GPU能看到的CQ描述符缓冲区，dci、主和备RC，每条RC连接都挂两条CQ(send + recv)，GPU侧的globalmem.cqs就可以顺序index到所有CQ。
+```cpp
+static int ibgda_setup_cq_gpu_state(nvshmemt_ibgda_state_t *ibgda_state, nvshmem_transport_t t, int num_dci_handles, int *num_cq_handles, nvshmemi_ibgda_device_cq_t **cq_h, nvshmemi_ibgda_device_cq_t **cq_d) {
+	
+}
+```
+### 2.7 ibgda_copy_cq_gpu_data
 
 ## 3 struct
 ### 3.1 nvshmemi_ibgda_device_cq_t
@@ -287,4 +401,28 @@ typedef struct nvshmemi_ibgda_device_qp {
 	} rx_wq;
 	nvshmemi_ibgda_device_qp_management_v1 mvars; // 保存QP的动态状态
 } nvshmemi_ibgda_device_qp_v1;
+```
+### 3.3 nvshmemi_ibgda_device_qp_management
+```cpp
+typedef struct {
+    int version; // 结构体版本号
+    int post_send_lock; // 一个简单的自旋锁，用于在多个线程同时尝试向发送队列提交工作请求（WQE）时保证WQE的原子性
+    struct {
+        // 所有索引都以 wqe 为单位
+        uint64_t resv_head;   // 最后一个被预留的 wqe 索引 + 1
+        uint64_t ready_head;  // 最后一个准备就绪的 wqe 索引 + 1
+        uint64_t prod_idx;    // 已提交的 wqe 索引 + 1 (生产者索引 + 1)
+        uint64_t cons_idx;    // 已轮询完成的 wqe 索引 + 1 (消费者索引 + 1)
+        uint64_t get_head;    // 最后一个 "fetch" 操作 (g, get, amo_fetch) 的 wqe 索引 + 1
+        uint64_t get_tail;    // 最后一个通过 cst 轮询完成的 wqe 索引 + 1; get_tail > get_head 是可能的
+    } tx_wq;
+    struct {
+        uint64_t resv_head;   // 最后一个被预留的 wqe 索引 + 1, 预留指针头。在接收端，这通常由软件预先填充好接收缓冲区，然后更新此索引，表示有多少个缓冲区准备好接收数据。
+        uint64_t cons_idx;    // 已轮询完成的 wqe 索引 + 1 (消费者索引 + 1), 当硬件接收到数据并放入一个接收缓冲区后，软件通过检查 CQ 确认完成，然后更新此索引，表示它已经“消费”了这个接收到的数据包。
+    } rx_wq;
+    struct {
+        uint64_t head;
+        uint64_t tail;
+    } ibuf; // 管理一个环形缓冲区ibuf
+} nvshmemi_ibgda_device_qp_management_v1;
 ```
