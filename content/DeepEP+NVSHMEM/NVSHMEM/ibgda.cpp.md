@@ -117,8 +117,21 @@ graph TB
 ```
 
 ## 2  function
+### nvshmemt_ibgda_connect_endpoints
+在`nvshmemt_ibgda_connect_endpoints`内，nvshmem看到不是首次调用就会调用ibgda_connect_rc_only，上层请求新RC QP的时候走**2.1和2.2**，不会走DCI/DCT的流程。这样可以在不中断 GPU 的情况下补齐更多 QP，并在 ibgda_setup_gpu_state 里重新打包最新的 RC/backup 数据块。
+```cpp
+if (!ibgda_state->connect_endpoints_first_call) {
+    return ibgda_connect_rc_only(ibgda_state, t, out_qp_indices, num_qps);
+}
+```
+在第一次调用的时候，会for循环所有device：
+1. ibgda_connect_global_setup
+2. ibgda_connect_device_calculations（calculation and validation）
+3. ibgda_connect_device_resources（ibgda_allocate_rc_structures）
+4. ibgda_connect_device_endpoints（ibgda_setup_rc_endpoints）
+5. ibgda_setup_gpu_state
 ### 2.1 ibgda_allocate_rc_structures
-负责为RC(reliable connection) QP分配数据结构，支持动态扩展。
+为每个device分配host侧的RC数据，准备后续创建QP和CQ时需要的内存
 ```cpp
 static int ibgda_allocate_rc_structures(nvshmem_transport_t t, struct ibgda_device *device, int num_rc_eps) {
     int n_pes = t->n_pes;  // 总进程数
@@ -167,7 +180,7 @@ struct ibgda_rc_handle {
 	* send和recv的CQ
 
 ### 2.2 ibgda_setup_rc_endpoints
-创建并配置主RC队列对，是RDMA连接的核心逻辑。
+利用刚才分配好的handle去真是创建RC和QP，把QP/CQ的地址写到device_state_cache->rc_h并更新 ibgda_state->cur_qp_index 等索引，最终为 GPU 端 nvshmemi_ibgda_device_state_t 提供可发布的数据。
 ```cpp
 static int ibgda_setup_rc_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
                                     struct ibgda_device *device, int portid, 
@@ -220,6 +233,58 @@ static int ibgda_setup_rc_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
 RC是点对点的，需要知道对端的QPN，且需要全局所有rank都完成QP创建后才进行状态的转换。
 #### c. QP 状态转换
 使用对等节点的句柄信息来初始化本地 RC 连接
+### 2.3 ibgda_setup_rc_gpu_state
 
-### 2.3 ibgda_populate_rc_gpu_data
-	
+### 2.4 ibgda_populate_rc_gpu_data
+
+## 3 struct
+### 3.1 nvshmemi_ibgda_device_cq_t
+函数签名如下，
+```cpp
+typedef struct {
+    int version;
+    nvshmemi_ibgda_device_qp_type_t qp_type; // 标记该 CQ 绑定的 QP 类型（DCI、DCT、RC 等），用于设备端执行不同的处理路径
+    __be32 *dbrec; // CQ 的 doorbell record 映射地址，GPU 需要写入它来通知 NIC 已经消费了多少 CQE
+    void *cqe;// 指向 CQE 环（CQ entries）的首地址，GPU 通过它轮询完成条目。
+    uint64_t *prod_idx;// 生产者索引，表示主机/NIC 已经写入的 CQE 数（加 1 的形式）；设备端根据它判断可读的范围。
+    uint64_t *cons_idx;// 消费者索引，GPU 自己维护，表示已经处理过的 CQE 数（同样是 idx+1 表示方式）。
+    uint64_t *resv_head;// 在共享 CQ 场景下的缓冲指针, 用于“已保留但未就绪”的边界，帮助原子地批量处理 CQE。
+    uint64_t *ready_head;// 在共享 CQ 场景下的缓冲指针, 用于“就绪可消费”的边界，帮助原子地批量处理 CQE。
+    uint32_t cqn;// 底层 verbs CQ 对象的 CQ number，调试和诊断时用。
+    uint32_t ncqes;// CQ 支持的条目数量（深度），GPU 侧需要据此取模处理环形缓冲。
+    uint32_t qpn;// 与此 CQ 绑定的 QP number，用于将 CQ 与具体 QP 对上号
+} nvshmemi_ibgda_device_cq_v1;
+```
+### 3.2 nvshmemi_ibgda_device_qp_t
+```cpp
+typedef struct nvshmemi_ibgda_device_qp {
+	int version;
+	nvshmemi_ibgda_device_qp_type_t qp_type; // QP 类型：RC (可靠连接), DCI (动态连接), DCT (动态连接目标)
+	uint32_t qpn;     // Queue Pair Number，硬件分配的唯一 ID，用于网络包路由
+	uint32_t dev_idx; // 关联的设备索引
+	struct {
+	    uint32_t nslots;  // 用于 fetch 操作的槽位数量
+	    void *buf;        // 缓冲区指针
+	    __be32 lkey;      // 本地内存密钥 (Local Key)
+	    __be32 rkey;      // 远程内存密钥 (Remote Key)
+	} ibuf; // 执行shmem_get/fetch_add等，RNIC去远端读回来的数据先存ibuf，再拷贝给user
+	struct {
+	    uint16_t nwqes;  // WQE (Work Queue Entry) 的数量，即队列深度
+	    void *wqe;       // 指向 WQE 环形缓冲区的指针（通常映射到 GPU 显存或网卡内存）
+	    __be32 *dbrec;   // Doorbell Record，门铃记录。用来告诉网卡"我有新任务了"
+	    void *bf;        // BlueFlame 缓冲区，一种低延迟的门铃机制（直接把 WQE 写到网卡寄存器）
+	    nvshmemi_ibgda_device_cq_t *cq; // 指向关联的完成队列 (CQ)，用来检查任务是否完成
+	    uint64_t *prod_idx; // 生产者索引指针，指向 mvars 中的 prod_idx
+	} tx_wq; // cuda thread构造一个WQE写到指向的内存->update prod_idx->敲响dbrec门铃->RNIC开始工作
+	struct {
+	    uint16_t nwqes;      // 1. 队列深度
+	    uint64_t tail;       // 2. 尾部索引 (用于流控或回绕处理)
+	    void *wqe;           // 3. WQE 环形缓冲区指针
+	    __be32 *dbrec;       // 4. 门铃记录 (Doorbell Record)
+	    void *bf;            // 5. BlueFlame (通常用于 TX，这里保留可能是为了结构对称或特殊用途)
+	    nvshmemi_ibgda_device_cq_t *cq; // 6. 接收完成队列
+	    uint64_t *prod_idx;  // 7. 生产者索引指针
+	} rx_wq;
+	nvshmemi_ibgda_device_qp_management_v1 mvars; // 保存QP的动态状态
+} nvshmemi_ibgda_device_qp_v1;
+```

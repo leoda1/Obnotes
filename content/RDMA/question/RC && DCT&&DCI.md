@@ -1,5 +1,5 @@
 ## 问题1: DCI，DCT都是啥
-在RC中每个节点要建立一对QP，如果N节点就需要N-1个连接。规模越大，QP越多连接越慢。于是出现Dynamic Connected Transport（DC）机制。
+在RC（Reliable Connection ）中每个节点要建立一对QP，如果N节点就需要N-1个连接。规模越大，QP越多连接越慢。于是出现Dynamic Connected Transport（DC）机制。
 ### 0. 核心思想
 >传统RC：每个连接都是一对固定的QP。
 ```txt
