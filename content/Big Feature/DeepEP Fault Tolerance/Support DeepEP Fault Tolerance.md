@@ -4,6 +4,7 @@ git clone DeepEP/nvshmem，然后把deepEP下面的third-party内的nvshmem.patc
 ### compile
 这里的-DNVSHMEM_BUILD_PYTHON_LIB=OFF一定需要设置。
 ```shell
+c &&
 export CUDA_HOME=/usr/local/cuda
 export MPI_HOME=/usr/local/mpi
 export CPATH=/usr/local/mpi/include:$CPATH
@@ -15,7 +16,9 @@ NVSHMEM_SHMEM_SUPPORT=0 \
 NVSHMEM_UCX_SUPPORT=0 \
 NVSHMEM_USE_NCCL=0 \
 NVSHMEM_IBGDA_SUPPORT=1 \
+NVSHMEM_DEBUG=1 \
 NVSHMEM_PMIX_SUPPORT=0 \
+NVSHMEM_IBRC_SUPPORT=0 \
 NVSHMEM_MPI_SUPPORT=1 \
 NVSHMEM_IBDEVX_SUPPORT=1 \
 NVSHMEMTEST_MPI_SUPPORT=1 \
@@ -55,25 +58,39 @@ rmmod nv_peer_mem && modprobe nvidia_peermem
 ### test
 nvshmem/src/modules/transport/common/env_defs.h内有一些环境变量说明
 ```shell
-export NVSHMEM_DIR=/workspace/liuda/dev/nvshmem-fault-tolerance  # Use for DeepEP installation
-export LD_LIBRARY_PATH="${NVSHMEM_DIR}/lib:$LD_LIBRARY_PATH"
-export PATH="${NVSHMEM_DIR}/bin:$PATH"
+export MPI_HOME=/usr/local/mpi
+export CUDA_HOME=/usr/local/cuda
+export NVSHMEM_HOME=/workspace/liuda/output/nvshmem
+export LD_LIBRARY_PATH="${NVSHMEM_HOME}/lib:$CUDA_HOME/lib64:$MPI_HOME/lib:$LD_LIBRARY_PATH"
+$MPI_HOME/bin/mpirun -np 2 --allow-run-as-root \
+    --hostfile /workspace/liuda/dev/nvshmem-fault-tolerance/hostfile \
+    -x NVSHMEM_DEBUG=INFO \
+    -x LD_LIBRARY_PATH=${NVSHMEM_HOME}/lib:$CUDA_HOME/lib64:$MPI_HOME/lib:$LD_LIBRARY_PATH \
+    -x NVSHMEM_IB_ENABLE_IBGDA=1 \
+		-x NVSHMEM_IBGDA_LOG_LEVEL=3 \
+    -x NVSHMEM_IB_ENABLE_IBRC=0 \
+    -x NVSHMEMTEST_USE_MPI_LAUNCHER=1 \
+    -x NVSHMEM_IBGDA_NIC_HANDLER=auto \
+    -x NVSHMEM_IBGDA_FORCE_NIC_BUF_MEMTYPE=gpumem \
+    /workspace/liuda/dev/nvshmem-fault-tolerance/build/perftest/device/pt-to-pt/shmem_put_bw -b 4 -e 1024 -n 1 2>&1 | tee /workspace/liuda/dev/nvshmem-fault-tolerance/ibgda_test.log
 ```
-## 0.2 Compile  DeepEP
+## 0.2 Compile  and Test DeepEP
+### compile
 这里需要export TORCH_CUDA_ARCH_LIST="9.0" 不然会出问题。
 ```shell
-export NVSHMEM_DIR=/opt/nvshmem
+export NVSHMEM_DIR=/workspace/liuda/output/nvshmem
 export LD_LIBRARY_PATH="${NVSHMEM_DIR}/lib:$LD_LIBRARY_PATH"
 export PATH="${NVSHMEM_DIR}/bin:$PATH"
 export TORCH_CUDA_ARCH_LIST="9.0"
-NVSHMEM_DIR=/opt/nvshmem python setup.py build
+NVSHMEM_DIR=/workspace/liuda/output/nvshmem  python setup.py install
 ```
-test
+### test
 在不同机器上跑下面的指令
 ```shell
+# node gpu064
 MASTER_ADDR=gpu064 MASTER_PORT=29500 WORLD_SIZE=2 RANK=0 \
 python /workspace/liuda/dev/DeepEP/tests/test_internode.py
-
+# node gpu063
 MASTER_ADDR=gpu064 MASTER_PORT=29500 WORLD_SIZE=2 RANK=1 \
 python /workspace/liuda/dev/DeepEP/tests/test_internode.py
 ```
@@ -138,8 +155,6 @@ graph LR
 
     RNIC --> RGPU
 ```
-
-![[Support DeepEP Fault Tolerance 2025-11-10 21.03.35.excalidraw  | 100%]]
 ### 2.1.1 扩展数据结构
 在 `nvshmemt_ibgda_state_t` 结构体添加备份QP字段：
 ```c
@@ -287,11 +302,8 @@ static int ibgda_connect_device_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
 `ibgda_setup_backup_rc_endpoints` 实现参考 [[ibgda.cpp#2.2 ibgda_setup_rc_endpoints|主RC endpoints的setup函数]]的逻辑实现。
 
 #### c. GPU状态设置
-在上面的ep创建完毕之后，接下来nvshmemt_ibgda_connect_endpoints的phase 5就是ibgda_setup_gpu_state。在这个函数内我们需要修改一些函数来让备份RC和备份QP能正常发数据：
-* ibgda_setup_rc_gpu_state 计算backup RC的handle数量，分配设备上真实的内存，分配backup_rc_h和backup_rc_d。
-* ibgda_populate_rc_gpu_data填充backup QP的设备信息，关联CQ等等
-* ibgda_post_gpu_device_state添加备份 QP 数组指针到设备状态
-
+在 Phase 5（ibgda_setup_gpu_state）里，ibgda_populate_rc_gpu_data 和 ibgda_populate_backup_rc_gpu_data 会把主/备 QP 的 device 视角结构体一起发布到 nvshmemi_ibgda_device_state_t，并匹配 rc_health_status、rc_switch_time 等监控数组。运行时一旦 CQ 检测到失败，设备端就能根据这些索引迅速切到 backup RC——无需再触发 host 端 allocate。
+在ibgda_setup_gpu_state内首先设计了一个指针cq_cursor能够让DCI、主RC和backup RC都能在共享的CQ缓冲区拿到正确的区间。
 
 
 ### 2.1.10 清理资源
@@ -308,5 +320,8 @@ if (ibgda_state) {
 
 ## 2.3 Checkout to normal QP
 
-# 3. uni-test
-在
+# 3. Overall
+
+![[Support DeepEP Fault Tolerance 2025-11-10 21.03.35.excalidraw  | 100%]]
+# 4. uni-test
+测试的时候通过网卡或者交换机down口，所有操作见[[Down NIC Port]]。
