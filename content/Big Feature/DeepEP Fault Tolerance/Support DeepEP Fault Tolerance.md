@@ -31,7 +31,6 @@ cmake -G Ninja -S . -B build \
   -DCUDA_ARCHITECTURES=90 \
   -DNVSHMEM_BUILD_EXAMPLES=OFF \
   -DNVSHMEM_BUILD_PYTHON_LIB=OFF
-
 cmake --build build --target install -- -j 80
 ```
 1. **编译如果出现mlx5找不到：**
@@ -96,7 +95,7 @@ python /workspace/liuda/dev/DeepEP/tests/test_internode.py
 ```
 # 1 Related
 a. 在DeepEP的[[internode_ll.cu]]内包含了dispatch和combine，二者内使用了nvshmemi_ibgda_put_nbi_warp来通信，以及nvshmemi_ibgda_amo_nonfetch_add给remote进程加原子计数的原理。
-b. DeepEP的[[ibgda_device.cuh]]内具体写了nvshmemi_ibgda_put_nbi_warp和nvshmemi_ibgda_amo_nonfetch_add的接口。
+b. DeepEP的[[DeepEP+NVSHMEM/DeepEP/ibgda_device.cuh]]内具体写了nvshmemi_ibgda_put_nbi_warp和nvshmemi_ibgda_amo_nonfetch_add的接口。
 c. 具体的传输在NVSHMEM的[[ibgda.cpp]]内实现。
 # 2 Specific Plan
 ## 2.1 nvshmem ibgda create backup QP
@@ -303,19 +302,33 @@ static int ibgda_connect_device_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
 
 #### c. GPU状态设置
 在 Phase 5（ibgda_setup_gpu_state）里，ibgda_populate_rc_gpu_data 和 ibgda_populate_backup_rc_gpu_data 会把主/备 QP 的 device 视角结构体一起发布到 nvshmemi_ibgda_device_state_t，并匹配 rc_health_status、rc_switch_time 等监控数组。运行时一旦 CQ 检测到失败，设备端就能根据这些索引迅速切到 backup RC——无需再触发 host 端 allocate。
-在ibgda_setup_gpu_state内首先设计了一个指针cq_cursor能够让DCI、主RC和backup RC都能在共享的CQ缓冲区拿到正确的区间。
 
-
-### 2.1.10 清理资源
-在 `out:` 标签的清理代码中，添加备份数组的释放：
-```c
-if (ibgda_state) {
-    if (ibgda_state->backup_dev_ids) free(ibgda_state->backup_dev_ids);
-    if (ibgda_state->backup_port_ids) free(ibgda_state->backup_port_ids);
-    if (ibgda_state->is_single_port_card) free(ibgda_state->is_single_port_card);
+## 2.2 Check CQ status and checkout to backup QP
+这个部分就要兼顾上层DeepEP调用 `nvshmemi_ibgda_put_nbi_warp` 和 `nvshmemi_ibgda_amo_nonfetch_add`后如何优雅的检查当前CQ状态和快速切换QP。NVSHMEM和DeepEP的内存布局不一致，具体原因见[[DeepEP+NVSHMEM/NVSHMEM/ibgda_device.cuh#2.1 ibgda_get_rc| ibgda_device.cuh]]，所以最终nvshmem又降版本到3.4.5。
+思路就是：在DeepEP内nvshmemi_ibgda_put_nbi_warp的时候，发送数据的每个warp的threadIdx.1去看当前cq的完成状态，如果有问题就去更新当前QP的状态机，并切换到backup QP重新发送一次。
+### 2.2.1 nvshmemi_ibgda_use_backup_qp
+这个接口想囊括住update QP status, check CQ status and checkout backup QP这三个功能。
+```cpp
+__device__ static __forceinline__ bool nvshmemi_ibgda_use_backup_qp(int qp_idx, nvshmemi_ibgda_device_cq_t *cq) {
+    nvshmemi_ibgda_device_state_t* state = ibgda_get_state();
+    uint8_t health = state->globalmem.rc_health_status[qp_idx];
+    if (health == IBGDA_QP_HEALTH_FAILED) {
+        uint64_t switch_time = state->globalmem.rc_switch_time[qp_idx];
+        if (ibgda_time_elapsed(switch_time, state->recovery_interval_cycles)) {
+            state->globalmem.rc_health_status[qp_idx] = IBGDA_QP_HEALTH_RECOVERING;
+            state->globalmem.rc_failure_count[qp_idx] = 0;
+            return false; // use main QP
+        }
+        return true;  // continue using backup QP
+    }
+    if (health == IBGDA_QP_HEALTH_GOOD) {
+        uint64_t last_check = state->globalmem.rc_last_check_time[qp_idx];
+        unint64_t current = ibgda_get_clock_cycles();
+        if (current - last_check)
+    }
 }
 ```
-## 2.2 Check CQ status and checkout to backup QP
+
 
 
 ## 2.3 Checkout to normal QP
@@ -325,3 +338,7 @@ if (ibgda_state) {
 ![[Support DeepEP Fault Tolerance 2025-11-10 21.03.35.excalidraw  | 100%]]
 # 4. uni-test
 测试的时候通过网卡或者交换机down口，所有操作见[[Down NIC Port]]。
+
+# 5. question
+为什么 backup RC 复用主 RC 的 CQ：
+答：

@@ -383,7 +383,43 @@ exit:
   *done = 1;                                          // 标记操作完成
   return ret;
 ```
-4. 打印p2p
+### who open Handle
+在nccl的receiver自己拿到handle之后会去调用proxy，如下：
+```cpp
+if (proxyConn) {
+    INFO(NCCL_REG, "rank %d - IPC registering buffer %p size %ld (baseAddr %p size %ld) to peer %d", comm->rank, userbuff, buffSize, (void*)regRecord->addr, ipcInfo.size, peerRank);
+    NCCLCHECKGOTO(ncclProxyCallBlocking(comm, proxyConn, ncclProxyMsgRegister, &ipcInfo, sizeof(p2pIpcExpInfo), &rmtRegAddr, sizeof(void*)), ret, fail);
+}
+```
+这里的proxyConn是：ncclProxyConnect(comm, TRANSPORT_P2P, 1, peerRank, ...) 建立的是到 peerRank 的 proxy 连接。所以 `ncclProxyCallBlocking` 发送的消息是发到对端peer的proxy线程去。
+```cpp
+if (comm->gproxyConn[peerRank].initialized == false) {
+	NCCLCHECKGOTO(ncclProxyConnect(comm, TRANSPORT_P2P, 1, peerRank, &comm->gproxyConn[peerRank]), ret, fail);
+}
+proxyConn = &comm->gproxyConn[peerRank];
+```
+对端的proxy收到后，调用 p2pProxyRegister 函数
+```cpp
+static ncclResult_t p2pProxyRegister(struct ncclProxyConnection* connection, 
+    struct ncclProxyState* proxyState, void* reqBuff, ...) {
+    
+    struct p2pIpcExpInfo* ipcExpInfo = (struct p2pIpcExpInfo*)reqBuff;
+    
+    // 对端 proxy 在自己的 CUDA context 中打开 IPC handle
+    if (ipcExpInfo->legacyIpcCap) {
+        // 使用 cudaIpcOpenMemHandle 打开发送方导出的 IPC handle
+        cudaIpcOpenMemHandle(&regAddr, ipcExpInfo->ipcDesc.devIpc, ...);
+    } else {
+        // cuMem API 方式
+        cuMemImportFromShareableHandle(&handle, ...);
+        cuMemMap(...);
+    }
+    
+    // 返回本地映射后的地址
+    *(void**)respBuff = regAddr;
+}
+```
+以上是nccl内在bootstrap阶段 `ringAllInfo`函数内调用 `bootstrapAllGather` 收集所有rank的proxy监听地址才支持的当前进程连接其他进程的proxy。
 ## 6. 清理阶段
 ### p2pSendFree()
 释放发送端资源

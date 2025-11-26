@@ -2,7 +2,7 @@
 在RC（Reliable Connection ）中每个节点要建立一对QP，如果N节点就需要N-1个连接。规模越大，QP越多连接越慢。于是出现Dynamic Connected Transport（DC）机制。
 ### 0. 核心思想
 >传统RC：每个连接都是一对固定的QP。
-```txt
+```cu
 Rank0 QP ↔ Rank1 QP
 Rank0 QP ↔ Rank2 QP
 Rank0 QP ↔ Rank3 QP
@@ -58,7 +58,6 @@ struct ibv_qp {
 };
 ```
 > 一对 QP（本地 + 远端） = 一条可靠通信通道（RC）。
-
 ### 2. nvshmem内的ibgda_setup_rc_endpoints
 1. 创建多个QP
 2. 给这些QP分配和绑定CQ

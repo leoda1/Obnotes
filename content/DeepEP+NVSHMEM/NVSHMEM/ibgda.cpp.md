@@ -130,6 +130,7 @@ if (!ibgda_state->connect_endpoints_first_call) {
 3. ibgda_connect_device_resources（ibgda_allocate_rc_structures）
 4. ibgda_connect_device_endpoints（ibgda_setup_rc_endpoints）
 5. ibgda_setup_gpu_state
+
 ### 2.1 ibgda_allocate_rc_structures
 为每个device分配host侧的RC数据，准备后续创建QP和CQ时需要的内存
 ```cpp
@@ -227,7 +228,7 @@ static int ibgda_setup_rc_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
 ```
 #### a. 创建RC QP Pairs
 * 两个for loop相当于每个rank/PE之间是全连接的，除了自己跟自己。那么单个rank就需要和其他所有rank建立n - 1条连接，就是变量 `num_eps_per_pe`。
-* 在device上的每个eps(endpoints)上创建QP。
+* 在device上的每个eps(endpoints)上创建 ibgda_create_qp ，包括RC QP/ DCI QP。
 * 每个发送端自己有自己的RC连接的本地handle用于下面alltoall交换节点的句柄信息。
 #### b. alltoall交换连接信息
 RC是点对点的，需要知道对端的QPN，且需要全局所有rank都完成QP创建后才进行状态的转换。
@@ -272,7 +273,7 @@ static int ibgda_setup_rc_gpu_state(nvshmemt_ibgda_state_t *ibgda_state, nvshmem
 
 ```
 * 先for loop，对每个选中的NIC的每个device->rc.num_eps_per_pe乘PE数量(n_pes)得出总的RC handle数量。
-* Host侧：开始分配nvshmemi_ibgda_device_qp_t结构的rc_h
+* Host侧：开始分配nvshmemi_ibgda_device_qp_t结构的rc_h，同时用全局变量last_num_rcs来控制当前的host侧初始化了多少rc_h
 * Device侧：开始分配rc_d
 ### 2.4 ibgda_populate_rc_gpu_data
 把host创建好的RC QP/CQ/XRC写入连续的GPU数组内，并把最终的cq_idx写回上层。
@@ -346,10 +347,33 @@ static int ibgda_copy_rc_gpu_data(nvshmemt_ibgda_state_t *ibgda_state, nvshmemi_
 给所有GPU能看到的CQ描述符缓冲区，dci、主和备RC，每条RC连接都挂两条CQ(send + recv)，GPU侧的globalmem.cqs就可以顺序index到所有CQ。
 ```cpp
 static int ibgda_setup_cq_gpu_state(nvshmemt_ibgda_state_t *ibgda_state, nvshmem_transport_t t, int num_dci_handles, int *num_cq_handles, nvshmemi_ibgda_device_cq_t **cq_h, nvshmemi_ibgda_device_cq_t **cq_d) {
-	
+	*num_cq_handles = 0;
+	for (int j = 0; j < n_devs_selected; j++) {
+        int dev_idx = ibgda_state->selected_dev_ids[j];
+        struct ibgda_device *device = (struct ibgda_device *)ibgda_state->devices + dev_idx;
+        *num_cq_handles += device->dci.num_eps + (device->rc.num_eps_per_pe * n_pes * 2) + (device->rc.num_backup_eps_per_pe * n_pes * 2);
+    }
+    *cq_h = (nvshmemi_ibgda_device_cq_t *)realloc(*cq_h, *num_cq_handles * sizeof(**cq_h));
+    
+    if (*cq_d != NULL) {
+        TRACE(ibgda_state->log_level, "Rellocating CQ device memory");
+        status = cudaMalloc(&cq_d_temp, *num_cq_handles * sizeof(**cq_d));
+        cudaMemcpyAsync(cq_d_temp, *cq_d, ibgda_state->last_num_cqs * sizeof(**cq_d),
+                        cudaMemcpyDeviceToDevice, ibgda_state->my_stream);
+        cudaStreamSynchronize(ibgda_state->my_stream);
+        cudaFree(*cq_d);
+        *cq_d = cq_d_temp;
+    } else {
+        TRACE(ibgda_state->log_level, "Allocating CQ device memory");
+        status = cudaMalloc(cq_d, *num_cq_handles * sizeof(**cq_d));
+    }
 }
 ```
+* 循环了NIC，每个设备上双倍主/备 QP+dci计算CQ需要的buffer（num_cq_handles）
+* host:接着按照num_cq_handles的sizeof直接calloc了CQ host memory，同样使用一个全局变量last_num_cqs来表示当前host侧初始化了多少cq_h
+* device:同理cq_d用cudaMalloc开辟了需要的cq_d
 ### 2.7 ibgda_copy_cq_gpu_data
+这个和2.5一致，但是这里不是拷贝rc_d，而是拷贝cq_d。
 
 ## 3 struct
 ### 3.1 nvshmemi_ibgda_device_cq_t
