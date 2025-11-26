@@ -60,7 +60,7 @@ const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
 | sub_warp_id                | warp在一个warp group内的index  | warp_id % num_warps_per_group              | ～=3 |
 | responsible_exp<br>ert_idx | warp group负责的expert的index | sm_id * num_warp_groups<br>+ warp_group_id |     |
 
-在前num_warps - 1个warp计算完后会调用nvshmem封装的ibgda的传输数据的接口，见[[ibgda_device.cuh]] 内的说明。传输前准备了几个参数：
+在前num_warps - 1个warp计算完后会调用nvshmem封装的ibgda的传输数据的接口，见[[DeepEP+NVSHMEM/DeepEP/ibgda_device.cuh]] 内的说明。传输前准备了几个参数：
 * `dst_expert_idx`：在不同warp执行代码的时候会去读该 token 的第 `warp_id` 个 topk 值，作为 `dst_expert_idx`
 * `slots_idx`: 每个warp的第一个线程计算`atomic_counter_per_expert + dst_expert_idx`然后`_shfl_sync`来广播给warp内其他31个线程。slots idx就是本次发送消息给专家x的某个槽
 * `dst_ptr`：这个 token 对应的消息，落在对方 rank 的“第几个 expert 的 buffer 里的第几个 slot 上”的地址偏移，逻辑上就是`rdma_recv_x[expert_local_idx][src_rank][slot_idx]`这个三维地址（nvshmem的对称内存有个相同的base）转成一维的地址。
