@@ -302,7 +302,7 @@ __device__ static __forceinline__ bool nvshmemi_ibgda_use_backup_qp(int qp_idx, 
 config:
   theme: 'neutral'
 ---
-graph TB
+flowchart TB
     subgraph HostNode[计算节点]
         App[训练框架 / 专家路由层]
         CommAbstraction[GPU 通信抽象层]
@@ -353,5 +353,3 @@ graph TB
 测试的时候通过网卡或者交换机down口，所有操作见[[Down NIC Port]]。
 
 # 5. question
-为什么 backup RC 复用主 RC 的 CQ：
-答：
