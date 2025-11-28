@@ -3,7 +3,7 @@
 **用images直接新run一个镜像：**
 
 ```cpp
-docker run -d -it --network=host --gpus all --privileged --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 -v /mnt/nfs:/workspace/  --name cuda129 crpi-w4le1oy1gd4wy3vu.cn-hangzhou.personal.cr.aliyuncs.com/ai-stack/liuda-deepmoe:latest
+docker run -d -it --network=host --gpus all --privileged --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 -v /mnt/nfs:/workspace/  --name liuda crpi-w4le1oy1gd4wy3vu.cn-hangzhou.personal.cr.aliyuncs.com/ai-stack/liuda-deepmoe:te2.8
 ```
 
 ```cpp
@@ -102,9 +102,9 @@ RUN apt-get update && \
 
 # 配置 SSH 服务：更换端口、关闭 HostKey 检查
 RUN mkdir -p /var/run/sshd && \
-    sed -i 's/#Port 22/Port 3217/' /etc/ssh/sshd_config && \
+    sed -i 's/#Port 22/Port 3218/' /etc/ssh/sshd_config && \
     echo "StrictHostKeyChecking no" >> /etc/ssh/ssh_config && \
-    echo "Port 3217" >> /etc/ssh/ssh_config
+    echo "Port 3218" >> /etc/ssh/ssh_config
 # 生成 SSH 密钥对（如果不存在），并配置免密登录
 RUN ssh-keygen -t rsa -N "" -f /root/.ssh/id_rsa && \
     cat /root/.ssh/id_rsa.pub >> /root/.ssh/authorized_keys && \
