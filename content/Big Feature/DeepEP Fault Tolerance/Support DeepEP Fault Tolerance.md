@@ -87,15 +87,63 @@ NVSHMEM_DIR=/workspace/liuda/output/nvshmem  python setup.py install
 在不同机器上跑下面的指令:
 ```shell
 # node201
-MASTER_ADDR=10.1.3.201 MASTER_PORT=29500 WORLD_SIZE=2 RANK=0 \
-python /workspace/liuda/fault/DeepEP/tests/test_internode.py
-# node201
-MASTER_ADDR=10.1.3.201 MASTER_PORT=29500 WORLD_SIZE=2 RANK=1 \
-python /workspace/liuda/fault/DeepEP/tests/test_internode.py
+export MPI_HOME=/usr/local/mpi
+export CUDA_HOME=/usr/local/cuda
+export NVSHMEM_HOME=/workspace/liuda/output/nvshmem
+export LD_LIBRARY_PATH="${NVSHMEM_HOME}/lib:$CUDA_HOME/lib64:$MPI_HOME/lib:$LD_LIBRARY_PATH"
+export NVSHMEM_DEBUG=INFO
+MASTER_ADDR=10.1.3.201 MASTER_PORT=29501 WORLD_SIZE=2 RANK=0 \
+python /workspace/liuda/fault/DeepEP/tests/test_internode.py  2>&1 | tee /workspace/liuda/fault/DeepEP/internode_test_node1.log
+# node023
+export MPI_HOME=/usr/local/mpi
+export CUDA_HOME=/usr/local/cuda
+export NVSHMEM_HOME=/workspace/liuda/output/nvshmem
+export LD_LIBRARY_PATH="${NVSHMEM_HOME}/lib:$CUDA_HOME/lib64:$MPI_HOME/lib:$LD_LIBRARY_PATH"
+MASTER_ADDR=10.1.3.201 MASTER_PORT=29501 WORLD_SIZE=2 RANK=1 \
+python /workspace/liuda/fault/DeepEP/tests/test_internode.py   2>&1 | tee /workspace/liuda/fault/DeepEP/internode_test_node2.log
 ```
-或者使用mpirun：
+1. **如果出现deepep走不到自己的deep_ep_cpp.cpython-38-x86_64-linux-gnu.so（没有共享存储的话）**
+先看每个编译的机器上是不是自带了deepep：
 ```shell
-
+python3 -c "import site, glob, os; \
+paths = site.getsitepackages() + [site.getusersitepackages()]; \
+print('\n'.join(paths)); \
+[print(p) for sp in paths for p in glob.glob(os.path.join(sp, 'deep_ep*'))]"
+```
+有的话直接：
+```shell
+rm -rf /usr/local/lib/python3.12/dist-packages/deep_ep*
+```
+然后在每个机器上单独重新编译：
+```shell
+export NVSHMEM_DIR=/workspace/liuda/output/nvshmem
+export LD_LIBRARY_PATH="${NVSHMEM_DIR}/lib:$LD_LIBRARY_PATH"
+export PATH="${NVSHMEM_DIR}/bin:$PATH"
+export TORCH_CUDA_ARCH_LIST="9.0"
+rm -rf /usr/local/lib/python3.12/dist-packages/deep_ep*
+cd /workspace/liuda/fault/DeepEP
+rm -rf build/
+rm deep_ep_cpp.cpython-312-x86*
+NVSHMEM_DIR=/workspace/liuda/output/nvshmem  python setup.py install
+```
+然后在DeepEP的目录下：
+```shell
+ln -s build/lib.linux-x86_64-cpython-312/deep_ep_cpp.cpython-312-x86_64-linux-gnu.so
+```
+2. **有共享存储的话就直接用python3 setup.py build，不install到usr/local**
+```shell
+export NVSHMEM_DIR=/workspace/liuda/output/nvshmem
+export LD_LIBRARY_PATH="${NVSHMEM_DIR}/lib:$LD_LIBRARY_PATH"
+export PATH="${NVSHMEM_DIR}/bin:$PATH"
+export TORCH_CUDA_ARCH_LIST="9.0"
+cd /workspace/liuda/fault/DeepEP
+rm deep_ep_cpp.cpython-312-x86*
+NVSHMEM_DIR=/workspace/liuda/output/nvshmem  python3 setup.py build
+ln -sf build/lib.linux-x86_64-cpython-312/deep_ep_cpp.cpython-312-x86_64-linux-gnu.so deep_ep_cpp.cpython-312-x86_64-linux-gnu.so
+```
+然后在测试脚本前面加上
+```shell
+export PYTHONPATH=/workspace/liuda/fault/DeepEP:$PYTHONPATH
 ```
 # 1 Related
 a. 在DeepEP的[[internode_ll.cu]]内包含了dispatch和combine，二者内使用了nvshmemi_ibgda_put_nbi_warp来通信，以及nvshmemi_ibgda_amo_nonfetch_add给remote进程加原子计数的原理。
@@ -353,3 +401,9 @@ flowchart TB
 测试的时候通过网卡或者交换机down口，所有操作见[[Down NIC Port]]。
 
 # 5. question
+- [ ] 1. per-PE初始化的话 pe0怎么去给pe1的nic设备初始化？直接自己process内多创QP再把handle发给另一个pe呢？
+
+
+# log
+- [x] Fixing NVSHMEM memory issue ✅ 2025-11-27
+- [x] 修改后的DeepEP python能链接到修改后的deepep和nvshmem的c++代码。 ✅ 2025-11-28
