@@ -401,7 +401,14 @@ flowchart TB
 测试的时候通过网卡或者交换机down口，所有操作见[[Down NIC Port]]。
 
 # 5. question
-- [ ] 1. per-PE初始化的话 pe0怎么去给pe1的nic设备初始化？直接自己process内多创QP再把handle发给另一个pe呢？
+- [ ] per-PE初始化的话 pe0怎么去给pe1的nic设备初始化？直接自己process内多创QP再把handle发给另一个pe呢？
+在nvshmem内正常情况是每个pe一个nic，所以不能跨进程去db另一个nic。在环境变量内有IBGDA_ENABLE_MULTI_PORT，可以让 `num_selected_devs`的值不会被hardcode成1，所以就可以doorbell多个NIC。具体原因是：
+1. uar = mlx5dv_devx_alloc_uar(context, MLX5DV_UAR_ALLOC_TYPE_NC);给每个device分配UAR(user access region)
+2. 用cudaHostRegisterIoMemory把NIC的MMIO区域注册给CUDA
+3. 然后调用 `ibgda_alloc_and_map_qp_uar` 去映射UAR到GPU
+
+- [ ] RDMA 操作是异步的，CQE 可能还没生成，这个时候去nvshmemi_ibgda_check_cq导致超时？需要看看为啥主的QP会被判定为故障
+- [ ] 
 
 
 # log
