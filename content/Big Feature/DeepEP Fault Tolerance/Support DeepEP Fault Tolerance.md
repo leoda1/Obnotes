@@ -1,5 +1,5 @@
 # 0 Base
-git clone DeepEP/nvshmem，然后把deepEP下面的third-party内的nvshmem.patch的改动加到自己的nvshmem上。
+ git clone DeepEP/nvshmem，然后把deepEP下面的third-party内的nvshmem patch的改动加到自己的nvshmem上。
 ## 0.1 Compile and Test NVSHMEM
 ### compile
 这里的-DNVSHMEM_BUILD_PYTHON_LIB=OFF一定需要设置。
@@ -197,7 +197,7 @@ typedef struct {
 ```
 ### 2.1.2 分配和初始化备份数组
 在 `nvshmemt_init` 中，在 `ibgda_state` 分配后，分配备份映射数组内存
-```c
+```cpp
 // 在 ibgda_state 字段赋值处添加
 ibgda_state->backup_dev_ids = (int *)malloc(MAX_NUM_PES_PER_NODE * sizeof(int));
 ibgda_state->backup_port_ids = (int *)malloc(MAX_NUM_PES_PER_NODE * sizeof(int));
@@ -214,7 +214,7 @@ ibgda_state->is_single_port_card = (bool *)malloc(MAX_NUM_PES_PER_NODE * sizeof(
   4. 对于无法找到备份的设备，记录警告日志
   
 一卡一口:
-```
+```cpp
 for i in 0..n_dev_ids:
     device_id = dev_ids[i]
     device = devices[device_id]
@@ -227,7 +227,7 @@ for i in 0..n_dev_ids:
             backup_port_ids[i] = port_ids[backup_idx]
 ```
 一卡两口:
-```
+```cpp
 if device.phys_port_cnt == 2:
     // 查找同一设备的另一个端口
     for j in 0..n_dev_ids:
@@ -345,12 +345,8 @@ __device__ static __forceinline__ bool nvshmemi_ibgda_use_backup_qp(int qp_idx, 
 其后，故障检测和切换完全在 GPU 侧完成。DeepEP 在发起 RDMA 操作后由 GPU 线程直接检查 CQ 是否超时或返回错误，通过一个简单的健康状态机为每条 QP 维护健康状态、连续失败次数以及最近切换时间。一旦某条主 QP 被判定故障，GPU 立即选择对应的备份 QP，重新计算本地/远端地址与密钥并发起传输，无需回到主机端重新建立连接，从而把故障切换的时延和开销降到最低。
 
 最后，为避免长期停留在备份 QP 影响带宽和资源利用，机制按 GPU 时钟周期设置恢复窗口：在一段时间内探测正常且失败计数清零后，状态机会自动把流量从备份 QP 切回主 QP，在 可靠性与性能之间取得平衡。
-```mermaid
----
-config:
-  theme: 'neutral'
----
-flowchart TB
+```txt
+graph TB
     subgraph HostNode[计算节点]
         App[训练框架 / 专家路由层]
         CommAbstraction[GPU 通信抽象层]
@@ -395,22 +391,70 @@ flowchart TB
 
     RNIC --> RGPU
 ```
-
+![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251203212042993.png)
 ![[Support DeepEP Fault Tolerance 2025-11-10 21.03.35.excalidraw  | 100%]]
 # 4. uni-test
 测试的时候通过网卡或者交换机down口，所有操作见[[Down NIC Port]]。
 
 # 5. question
 - [ ] per-PE初始化的话 pe0怎么去给pe1的nic设备初始化？直接自己process内多创QP再把handle发给另一个pe呢？
+
 在nvshmem内正常情况是每个pe一个nic，所以不能跨进程去db另一个nic。在环境变量内有IBGDA_ENABLE_MULTI_PORT，可以让 `num_selected_devs`的值不会被hardcode成1，所以就可以doorbell多个NIC。具体原因是：
 1. uar = mlx5dv_devx_alloc_uar(context, MLX5DV_UAR_ALLOC_TYPE_NC);给每个device分配UAR(user access region)
 2. 用cudaHostRegisterIoMemory把NIC的MMIO区域注册给CUDA
 3. 然后调用 `ibgda_alloc_and_map_qp_uar` 去映射UAR到GPU
+此外就是`num_selected_devs`需要去host侧修改 `nvshmemi_setup_connections` 函数解除nvshmem的限制，见下面源码。在 `nvshmemi_setup_connections` 内，主要就是先遍历所有transport插件（比如，ibgda,ibrc,ibuc,ucx等），然后剔除了被选择为bitmap和没建立连接的transport。`tcurr->n_devices / state->npes_node` 把当前transport最大nic数 平均分给每个PE。就得到了selected_devices数组（每个数对应一个nic）。
+然后在默认的分支内， `nvshmemi_get_devices_by_distance` 函数去根据topo(NVLink && Pcie)，找到每个GPU最近的NIC，对应填写到selected_devices[i]内，所以后面的for (int i = 0; i < max_devices_per_pe; i++) loop内，每个gpu只会有一个最近的卡，其余情况都break了，所以就是found_devices是1。最后在把具体的selected_devices传递给具体transport的`connect_endpoints`实现。IBGDA 那边接收的 num_selected_devs 就是这里的 found_devices，随后的 Mr, QP 创建都基于这个数。connect 完还会 barrier 同步，然后调用 nvshmemi_update_device_state() 更新全局状态。
+```cpp
+// src/host/transport/transport.cpp
+int nvshmemi_setup_connections(nvshmemi_state_t *state) {
+    nvshmem_transport_t *transports = (nvshmem_transport_t *)state->transports;
+    nvshmem_transport_t tcurr;
+    for (int i = 0; i < state->num_initialized_transports; i++) {
+        if (!((state->transport_bitmap) & (1 << i))) continue;
+        tcurr = transports[i];
+        if (!(tcurr->attr & NVSHMEM_TRANSPORT_ATTR_CONNECTED)) {
+            continue;
+        }
+        
+        int devices_temp = tcurr->n_devices / state->npes_node;
+        if (devices_temp == 0) devices_temp = 1;
+        const int max_devices_per_pe = devices_temp;
+        int selected_devices[max_devices_per_pe];
+        int found_devices = 0;
+
+        for (int j = 0; j < max_devices_per_pe; j++) {
+            selected_devices[j] = -1;
+        }
+        if (tcurr->n_devices <= 1) {
+            selected_devices[0] = tcurr->n_devices - 1;
+            found_devices++;
+        } else if (nvshmemi_options.ENABLE_NIC_PE_MAPPING) {
+            selected_devices[0] = nvshmemi_state->mype_node % (tcurr->n_devices > 0 ? tcurr->n_devices : 1);
+            found_devices++;
+        } else {
+            nvshmemi_get_devices_by_distance(selected_devices, max_devices_per_pe, tcurr);
+            for (int i = 0; i < max_devices_per_pe; i++) {
+                if (selected_devices[i] == -1) {
+                    break;
+                }
+                found_devices++;
+            }
+        }
+        status = tcurr->host_ops.connect_endpoints(tcurr, selected_devices, found_devices);
+        status = nvshmemi_boot_handle.barrier(&nvshmemi_boot_handle);
+        status = nvshmemi_update_device_state();
+    }
+}
+```
+
 
 - [ ] RDMA 操作是异步的，CQE 可能还没生成，这个时候去nvshmemi_ibgda_check_cq导致超时？需要看看为啥主的QP会被判定为故障
-- [ ] 
+
+
 
 
 # log
-- [x] Fixing NVSHMEM memory issue ✅ 2025-11-27
+- [x] Fixing NVSHMEM memory issue ✅ 2025-12-03
 - [x] 修改后的DeepEP python能链接到修改后的deepep和nvshmem的c++代码。 ✅ 2025-11-28
+- [ ] 设置num_selected_devs为2
