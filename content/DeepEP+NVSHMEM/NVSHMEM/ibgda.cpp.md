@@ -116,8 +116,7 @@ graph TB
     style SwitchBackup fill:#ffb74d
 ```
 
-## 2  function
-### nvshmemt_ibgda_connect_endpoints
+## 2  nvshmemt_ibgda_connect_endpoints
 在`nvshmemt_ibgda_connect_endpoints`内，nvshmem看到不是首次调用就会调用ibgda_connect_rc_only，上层请求新RC QP的时候走**2.1和2.2**，不会走DCI/DCT的流程。这样可以在不中断 GPU 的情况下补齐更多 QP，并在 ibgda_setup_gpu_state 里重新打包最新的 RC/backup 数据块。
 ```cpp
 if (!ibgda_state->connect_endpoints_first_call) {
@@ -234,7 +233,6 @@ static int ibgda_setup_rc_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
 RC是点对点的，需要知道对端的QPN，且需要全局所有rank都完成QP创建后才进行状态的转换。
 #### c. QP 状态转换
 使用对等节点的句柄信息来初始化本地 RC 连接
-### 设置GPU state，以下
 ### 2.3 ibgda_setup_rc_gpu_state
 该函数只负责容量规划和内存就绪，不写到实际的QP/CQ数据内。在后面ibgda_populate_rc_gpu_data和ibgda_copy_rc_gpu_data才真正填充。
 ```cpp
@@ -374,6 +372,18 @@ static int ibgda_setup_cq_gpu_state(nvshmemt_ibgda_state_t *ibgda_state, nvshmem
 * device:同理cq_d用cudaMalloc开辟了需要的cq_d
 ### 2.7 ibgda_copy_cq_gpu_data
 这个和2.5一致，但是这里不是拷贝rc_d，而是拷贝cq_d。
+
+## 3 nvshmemt_ibgda_get_mem_handle
+host侧为 IBGDA transport注册个缓冲区，并把这个缓冲区的lkey写入到GPU使用的表结构内。
+```cpp
+int nvshmemt_ibgda_get_mem_handle(nvshmem_mem_handle_t *mem_handle, void *buf, size_t length,
+                                  nvshmem_transport_t t, bool local_only) {
+
+}
+```
+
+
+## 4 nvshmemt_ibgda_add_device_remote_mem_handles
 
 ## 3 struct
 ### 3.1 nvshmemi_ibgda_device_cq_t

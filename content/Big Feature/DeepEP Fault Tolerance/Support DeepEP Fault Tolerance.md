@@ -345,7 +345,7 @@ __device__ static __forceinline__ bool nvshmemi_ibgda_use_backup_qp(int qp_idx, 
 其后，故障检测和切换完全在 GPU 侧完成。DeepEP 在发起 RDMA 操作后由 GPU 线程直接检查 CQ 是否超时或返回错误，通过一个简单的健康状态机为每条 QP 维护健康状态、连续失败次数以及最近切换时间。一旦某条主 QP 被判定故障，GPU 立即选择对应的备份 QP，重新计算本地/远端地址与密钥并发起传输，无需回到主机端重新建立连接，从而把故障切换的时延和开销降到最低。
 
 最后，为避免长期停留在备份 QP 影响带宽和资源利用，机制按 GPU 时钟周期设置恢复窗口：在一段时间内探测正常且失败计数清零后，状态机会自动把流量从备份 QP 切回主 QP，在 可靠性与性能之间取得平衡。
-```txt
+```text
 graph TB
     subgraph HostNode[计算节点]
         App[训练框架 / 专家路由层]
@@ -397,7 +397,7 @@ graph TB
 测试的时候通过网卡或者交换机down口，所有操作见[[Down NIC Port]]。
 
 # 5. question
-- [ ] per-PE初始化的话 pe0怎么去给pe1的nic设备初始化？直接自己process内多创QP再把handle发给另一个pe呢？
+- [ ] per-PE初始化的话 pe0怎么去给pe1的nic设备初始化？
 
 在nvshmem内正常情况是每个pe一个nic，所以不能跨进程去db另一个nic。在环境变量内有IBGDA_ENABLE_MULTI_PORT，可以让 `num_selected_devs`的值不会被hardcode成1，所以就可以doorbell多个NIC。具体原因是：
 1. uar = mlx5dv_devx_alloc_uar(context, MLX5DV_UAR_ALLOC_TYPE_NC);给每个device分配UAR(user access region)
@@ -447,6 +447,138 @@ int nvshmemi_setup_connections(nvshmemi_state_t *state) {
     }
 }
 ```
+知道原理后，在nvshmemi_get_devices_by_distance计算完topo之后，每个seleted_device都找到了自己最近的nic，所以我们在最近的基础上去找隔壁的，大致逻辑就是：gpu1选的是nic1，我现在去让gpu1的seleted_devices[1]的位置存现在的backup的id，原来的seleted_devices[0]还是存它的主设备的id。这样所有gpu的device都是两个。
+```cpp
+if (ibgda_backup && found_devices > 0 && found_devices < max_devices_per_pe) {
+            const int backup_dev =
+                nvshmemi_pick_adjacent_nic(selected_devices[0], tcurr->n_devices);
+            if (backup_dev >= 0) {
+                selected_devices[found_devices++] = backup_dev;
+                INFO(NVSHMEM_INIT, "IBGDA backup NIC mapping: primary %d backup %d",
+                     selected_devices[0], backup_dev);
+            } else {
+                WARN("IBGDA multi-port requested but no adjacent NIC found; backup disabled.");
+            }
+        }
+```
+选择backup的id则通过偶数+1，奇数-1去互相备份选择设备.
+```cpp
+static int nvshmemi_pick_adjacent_nic(int primary, int total) {
+    if (total < 2 || primary < 0) return -1;
+    int candidate = (primary % 2 == 0) ? primary + 1 : primary - 1;
+    if (candidate >= 0 && candidate < total) return candidate;
+    candidate = primary - 1;
+    if (candidate >= 0) return candidate;
+    candidate = (primary + 1) % total;
+    return (candidate != primary) ? candidate : -1;
+}
+```
+现在可以看到selected_devices的选择变成2，那么每个gpu执行到 `status = tcurr->host_ops.connect_endpoints(tcurr, selected_devices, found_devices);`  的时候就可以拿到这里我提前计算好主和备网卡id的数组。测试如下：
+![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251204161310418.png)
+
+- [ ] 在某个gpu上能看到两张网卡之后，建立备份QP的逻辑难点？
+
+- [ ] 备份QP在另一个NIC上，主设备的MR不能直接用于备份QP，所以怎么去给备份设备的PD上注册自己MR？以及Lkey和Rkey的部分应该怎么设计？
+
+在 `ibgda_mem_handle` 内增加对应的备份MR的需要的字段如下：
+```cpp
+struct ibgda_mem_handle {
+    struct nvshmemt_ib_common_mem_handle dev_mem_handles[NVSHMEMI_IBGDA_MAX_DEVICES_PER_PE];
+    struct nvshmemt_ib_common_mem_handle backup_dev_mem_handles[NVSHMEMI_IBGDA_MAX_DEVICES_PER_PE];
+    int num_devs;
+    int num_backup_devs;  // Number of backup devices with registered MRs
+};
+```
+注册Mr和Lkey的代码在 `nvshmemt_ibgda_get_mem_handle` 内，原来是在每个主NIC的PD上注册MR，在主NIC的PD上完成MR注册后，现在需要再去拿备份NIC的PD完成MR注册，这样我当前这个GPU同一段buf上length长度的显存就可以被两个NIC直接RDMA访问。
+```cpp
+// 主的：
+status = nvshmemt_ib_common_reg_mem_handle(
+            &ftable, &mlx5dv_ftable, device->pd, dev_handle, buf, length, local_only,
+            ibgda_state->dmabuf_support_for_data_buffers, ibgda_cuda_syms, ibgda_state->log_level,
+            ibgda_state->options->IB_ENABLE_RELAXED_ORDERING, device->data_direct, alias_va_ptr);
+handle->num_backup_devs = 0;
+// 备份的：
+if (ibgda_state->fault_tolerance_enabled && ibgda_state->backup_dev_ids) {
+    for (int i = 0; i < n_devs_selected; ++i) {
+        // 通过 backup_dev_ids 映射找到备份设备 ID
+        int backup_dev_id = ibgda_state->backup_dev_ids[ibgda_state->selected_dev_ids[i]];
+        // 在备份设备的 PD 上注册 MR
+        status = nvshmemt_ib_common_reg_mem_handle(
+                &ftable, &mlx5dv_ftable, backup_device->pd, backup_handle, buf, length, local_only,
+                ibgda_state->dmabuf_support_for_data_buffers, ibgda_cuda_syms, ibgda_state->log_level,
+                ibgda_state->options->IB_ENABLE_RELAXED_ORDERING, backup_device->data_direct,
+                alias_va_ptr);
+        handle->num_backup_devs++;
+    }
+}
+```
+nvshmemt_ib_common_reg_mem_handle内具体的注册MR函数是rdma-core 提供的 libibverbs 接口，初始化阶段 `nvshmemt_ibv_ftable_init` 用dlsym把ibv_reg_dmabuf_mr装到函数表 `ftable->reg_dmabuf_mr` 内。实际注册的时候根据当前支持（GPU Direct Async、dma-buf、iova、直接pd上注册buf）的情况选择一种去注册。例如`reg_dmabuf_mr`：
+```cpp
+mr = ftable->reg_dmabuf_mr(pd, 0, size_aligned, (uint64_t)p, handle->fd,
+                           IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE |
+                           IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_ATOMIC |
+                           ro_flag);
+```
+通过以上的方法在两个gpu上打印日志看到可以看到gpu都用了nic1的PD注册了当前GPU显存的MR。
+![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251204221559808.png)
+在 `reg_dmabuf_mr` 内注册了MR后（handle内主和备的`dev_mem_handles`和`backup_dev_mem_handles`）会拿到lkey和rkey，我们对应的需要去拓展他们的表来存备份设备的key。备份QP需要的lkey和rkey按照`n_dev_seleted`往后的区域索引。
+
+主和备份的mr的lkey还在 `nvshmemt_ibgda_get_mem_handle` 内，依次把这两个lkey填写到ibgda_device_lkeys内。后续nvshmem会把分别放到cpu侧的`ibgda_device_state->constmem.lkeys`内，以及gpu侧的`ibgda_device_state->globalmem.lkeys`。主备的rkey则在 `nvshmemt_ibgda_add_device_remote_mem_handles` 内拓展，所有逻辑和lkey一致，lkey的拓展逻辑如下。
+```cpp
+// 原来: 表大小为 num_chunks * n_devs_selected，只写主设备 lkey
+if (ibgda_device_lkeys.size() < num_chunks * n_devs_selected) {
+    ibgda_device_lkeys.resize(num_chunks * n_devs_selected);
+}
+while (num_elements > 0) {
+    for (int i = 0; i < n_devs_selected; i++) {
+        // ... 只写主设备 lkey
+        ibgda_device_lkeys.at(((chunk_idx + num_elements - 1) * n_devs_selected) + i) = dev_key;
+    }
+    --num_elements;
+}
+
+// 改为: 表大小为 num_chunks * total_devs，同时写入主设备和备份设备的 lkey
+int total_devs = n_devs_selected + handle->num_backup_devs;
+if (ibgda_device_lkeys.size() < num_chunks * total_devs) {
+    ibgda_device_lkeys.resize(num_chunks * total_devs);
+}
+
+while (num_elements_copy > 0) {
+    // 写主设备 lkey (索引 0 到 n_devs_selected-1)
+    for (int i = 0; i < n_devs_selected; i++) {
+        ibgda_device_lkeys.at(((chunk_idx + num_elements_copy - 1) * total_devs) + i) = dev_key;
+    }
+    // 写备份设备 lkey (索引 n_devs_selected 到 total_devs-1)
+    for (int i = 0; i < handle->num_backup_devs; i++) {
+        device_lkey = htobe32(handle->backup_dev_mem_handles[i].lkey);
+        ibgda_device_lkeys.at(((chunk_idx + num_elements_copy - 1) * total_devs) + n_devs_selected + i) = dev_key;
+    }
+    --num_elements_copy;
+}
+```
+rkey在mem_transport层里面，`gather_mem_handles`的时候才会被调用，
+```cpp
+// src/host/mem/mem_transport.cpp
+int nvshmemi_mem_remote_transport::gather_mem_handles(nvshmemi_symmetric_heap &obj,
+                                                      uint64_t heap_offset, size_t size,
+                                                      bool ext_allocation) {
+    int status = 0;
+
+    NVSHMEMU_FOR_EACH(i, obj.get_state()->num_initialized_transports) {
+        nvshmem_transport_t tcurr = obj.get_state()->transports[i];
+        if (NVSHMEMU_IS_BIT_SET(obj.get_state()->transport_bitmap, i) &&
+            NVSHMEMI_TRANSPORT_OPS_IS_ADD_DEVICE_REMOTE_MEM(tcurr)) {
+            if (ext_allocation) {
+                status = tcurr->host_ops.add_device_remote_mem_handles(
+                    tcurr, obj.get_state()->num_initialized_transports,
+                    obj.remote_mmap_handles_.back().data(), heap_offset, size);
+            }
+        // ......
+        }
+    }
+}
+```
+
 
 
 - [ ] RDMA 操作是异步的，CQE 可能还没生成，这个时候去nvshmemi_ibgda_check_cq导致超时？需要看看为啥主的QP会被判定为故障
