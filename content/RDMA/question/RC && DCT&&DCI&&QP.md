@@ -57,7 +57,12 @@ struct ibv_qp {
     ...
 };
 ```
-> 一对 QP（本地 + 远端） = 一条可靠通信通道（RC）。
+**一对 QP（本地 + 远端） = 一条可靠通信通道（RC）。但是本地和远端各自的信息是不同的，主要是QPN、LID和GID**：
+* `QPN`：**每个网卡中的 QP 都有一个独特的 QPN**，表示当前这个队列对。本地NIC的多个QP都有一个唯一的QPN，通信时刻sender会使用QPN来指定它发送数据的目标队列对。远端NIC的也有自己的每个QP对于的QPN，当本地网卡发送过来的时候，它从远端网卡的QPN来匹配到远端网卡的相应队列对。
+    本地和远端网卡建链的时候，会交换QPN及其他。数据传输时，数据放入sendQue，并指定目标网卡的QPN，就可以确保数据正确发送到远端的recvQue。
+* `LID`：是 InfiniBand 网络中用于标识局部节点（设备）的 局部标识符。
+* `GID`：是 InfiniBand 网络中的 全局标识符，它是唯一的，跨越多个 InfiniBand 子网。GID 是基于 LID 的，但它更具通用性和可扩展性，可以在不同的子网之间进行识别。
+
 ### 2. nvshmem内的ibgda_setup_rc_endpoints
 1. 创建多个QP
 2. 给这些QP分配和绑定CQ
@@ -65,3 +70,4 @@ struct ibv_qp {
 4. **和peer交换**（bootstrap？？回头确定一下）连接信息（LID，GID，QPN）
 5. 调用`ibv_modify_qp()` 把 QP 转入 RTR / RTS 状态
 6. 保存为`device->rc.eps[i]` 数组（每个 peer 一个 endpoint）
+
