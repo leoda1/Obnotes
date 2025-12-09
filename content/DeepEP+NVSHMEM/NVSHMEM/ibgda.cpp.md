@@ -174,11 +174,10 @@ struct ibgda_rc_handle {
 
 #### b. 分配eps数组
 存储的是本地的RC endpoint的指针数组，可拓展性的方法和上面分配handle一样。这里的 `ibgda_ep` 后续会被填写：
-	* QP控制结构（wq,uar,dbr）
-	* QP句柄（devx_qp）
-	* 缓冲区
-	* send和recv的CQ
-
+* QP控制结构（wq,uar,dbr）
+* QP句柄（devx_qp）
+* 缓冲区
+* send和recv的CQ
 ### 2.2 ibgda_setup_rc_endpoints
 利用刚才分配好的handle去真是创建RC和QP，把QP/CQ的地址写到device_state_cache->rc_h并更新 ibgda_state->cur_qp_index 等索引，最终为 GPU 端 nvshmemi_ibgda_device_state_t 提供可发布的数据。
 ```cpp
@@ -372,19 +371,82 @@ static int ibgda_setup_cq_gpu_state(nvshmemt_ibgda_state_t *ibgda_state, nvshmem
 * device:同理cq_d用cudaMalloc开辟了需要的cq_d
 ### 2.7 ibgda_copy_cq_gpu_data
 这个和2.5一致，但是这里不是拷贝rc_d，而是拷贝cq_d。
+### 2.8 ibgda_create_cq_shared_objects
+为所有要创建的CQ一次性分配/注册一大片连续的CQ缓冲区和DBR（doorbell record）缓冲区，并把他们映射为GPU可访问的 `ibgda_mem_object`。在后续每次 `ibgda_create_`cq的时候只需要从这个共享内存内切一段( (cur_cq_off / cur_dbr_off) )给新的CQ使用。
+```cpp
+static int ibgda_create_cq_shared_objects(nvshmemt_ibgda_state_t *ibgda_state,
+                                          struct ibgda_device *device, int n_pes) {
+    struct ibv_context *context = device->context;
+    unsigned int num_cqs = device->dci.num_eps + device->rc.num_eps_per_pe * n_pes;
+    size_t num_cqe = IBGDA_ROUND_UP_POW2_OR_0(ibgda_qp_depth);
+    size_t cq_buf_size_per_cq = num_cqe * NVSHMEMI_IBGDA_CQE_SIZE;
+    size_t cq_buf_size = num_cqs * cq_buf_size_per_cq;
+    size_t dbr_buf_size = IBGDA_DBRSIZE * num_cqs;
 
+    struct ibgda_mem_object *cq_mobject = NULL;
+    struct ibgda_mem_object *dbr_mobject = NULL;
+     // Allocate and map CQ buffer for all CQs.
+    status = ibgda_nic_control_alloc(&cq_mobject, cq_buf_size, IBGDA_GPAGE_SIZE);
+    status = cudaMemset(cq_mobject->base.gpu_ptr, 0xff, cq_mobject->base.size);
+    status = ibgda_mobject_nic_map(cq_mobject, context, IBV_ACCESS_LOCAL_WRITE, 
+                                        ibgda_state->dmabuf_support_for_control_buffers);
+    
+    // Allocate and map Doorbell Record buffer for all CQs.
+    status = ibgda_nic_control_alloc(&dbr_mobject, dbr_buf_size, IBGDA_GPAGE_SIZE);
+    status = ibgda_mobject_nic_map(dbr_mobject, context, IBV_ACCESS_LOCAL_WRITE,
+                                           ibgda_state->dmabuf_support_for_control_buffers);  
+```
+### 2.9 
 ## 3 nvshmemt_ibgda_get_mem_handle
 host侧为 IBGDA transport注册个缓冲区，并把这个缓冲区的lkey写入到GPU使用的表结构内。
 ```cpp
 int nvshmemt_ibgda_get_mem_handle(nvshmem_mem_handle_t *mem_handle, void *buf, size_t length,
-                                  nvshmem_transport_t t, bool local_only) {
+                                        nvshmem_transport_t t, bool local_only) {
 
 }
 ```
 
-
 ## 4 nvshmemt_ibgda_add_device_remote_mem_handles
 
+## 5 nvshmemt_ibgda_finalize
+由再上一层的transport级的finalize函数调用，这里只会负责的dealloc ibgda.cpp内的资源。
+* 清理只有设备端可以访问的 ibgda_device_lkeys_d和ibgda_device_rkeys_d
+* 释放在`type_specific_shared_state`内保存的device端结构 (DCT/DCI/CQ/RC/还有我自己加的ff)
+* for loop了每个主设备上的DCI QP实例、DCT实例、RC QP实例和备份RC QP实例。归还共享的qp、dct和cq。
+* for loop了所有NIC设备，直接用libibverbs把pd和设备都释放掉
+* 针对GDRCopy、MLX5DV和ibv，逐个调用*\_fini()函数。
+* 释放 transport->state、transport->device_pci_paths 以及整个 nvshmem_transport 结构本身。
+```cpp
+// 下面是省略了很多for loop后的只有一部分调用接口的伪代码
+int nvshmemt_ibgda_finalize(nvshmem_transport_t transport) {
+    nvshmemt_ibgda_state_t *ibgda_state = (nvshmemt_ibgda_state_t *)transport->state;
+    nvshmemi_ibgda_device_state_t *ibgda_device_state_h;
+    if (ibgda_device_lkeys_d) {
+        cudaFree(ibgda_device_lkeys_d);
+        ibgda_device_lkeys_d = 0;
+    }
+    if (ibgda_device_rkeys_d) {
+        cudaFree(ibgda_device_rkeys_d);
+        ibgda_device_rkeys_d = 0;
+    }
+    ibgda_device_state_h = (nvshmemi_ibgda_device_state_t *)transport->type_specific_shared_state;
+    if (ibgda_device_state_h) {
+        cudaFree(ibgda_device_state_h);
+    }
+    status = ibgda_destroy_ep(device->dci.eps[i]);
+    status = ibgda_destroy_ep(device->dct.eps[i]);
+    status = ibgda_destroy_ep(device->rc.eps[i]);
+    status = ibgda_destroy_ep(device->rc.backup_eps[i]);
+    status = ibgda_destroy_qp_shared_objects(ibgda_state, device);
+    status = ibgda_destroy_dct_shared_objects(ibgda_state, device);
+    status = ibgda_destroy_cq_shared_objects(ibgda_state, device);
+    status = ftable.dealloc_pd(device->pd);
+    status = ftable.close_device(device->context);
+    nvshmemt_gdrcopy_ftable_fini(&gdrcopy_ftable, &gdr_desc, &gdrcopy_handle);
+    nvshmemt_ibv_ftable_fini(&ibv_handle);
+    nvshmemt_mlx5dv_ftable_fini(&mlx5dv_handle);
+    free(transport);
+```
 ## 3 struct
 ### 3.1 nvshmemi_ibgda_device_cq_t
 函数签名如下，

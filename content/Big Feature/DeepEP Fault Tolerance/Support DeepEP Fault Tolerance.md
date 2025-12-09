@@ -345,7 +345,7 @@ __device__ static __forceinline__ bool nvshmemi_ibgda_use_backup_qp(int qp_idx, 
 其后，故障检测和切换完全在 GPU 侧完成。DeepEP 在发起 RDMA 操作后由 GPU 线程直接检查 CQ 是否超时或返回错误，通过一个简单的健康状态机为每条 QP 维护健康状态、连续失败次数以及最近切换时间。一旦某条主 QP 被判定故障，GPU 立即选择对应的备份 QP，重新计算本地/远端地址与密钥并发起传输，无需回到主机端重新建立连接，从而把故障切换的时延和开销降到最低。
 
 最后，为避免长期停留在备份 QP 影响带宽和资源利用，机制按 GPU 时钟周期设置恢复窗口：在一段时间内探测正常且失败计数清零后，状态机会自动把流量从备份 QP 切回主 QP，在 可靠性与性能之间取得平衡。
-```text
+```mermaid
 graph TB
     subgraph HostNode[计算节点]
         App[训练框架 / 专家路由层]
@@ -391,14 +391,12 @@ graph TB
 
     RNIC --> RGPU
 ```
-![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251203212042993.png)
 ![[Support DeepEP Fault Tolerance 2025-11-10 21.03.35.excalidraw  | 100%]]
 # 4. uni-test
-测试的时候通过网卡或者交换机down口，所有操作见[[Down NIC Port]]。
+测试的时候通过网卡或者交换机down口，所有操作见[[How to Down RNIC Port]]。
 
 # 5. question
-- [ ] per-PE初始化的话 pe0怎么去给pe1的nic设备初始化？
-
+### 5.1 per-PE初始化的话 pe0怎么去给pe1的nic设备初始化？
 在nvshmem内正常情况是每个pe一个nic，所以不能跨进程去db另一个nic。在环境变量内有IBGDA_ENABLE_MULTI_PORT，可以让 `num_selected_devs`的值不会被hardcode成1，所以就可以doorbell多个NIC。具体原因是：
 1. uar = mlx5dv_devx_alloc_uar(context, MLX5DV_UAR_ALLOC_TYPE_NC);给每个device分配UAR(user access region)
 2. 用cudaHostRegisterIoMemory把NIC的MMIO区域注册给CUDA
@@ -447,7 +445,7 @@ int nvshmemi_setup_connections(nvshmemi_state_t *state) {
     }
 }
 ```
-知道原理后，在nvshmemi_get_devices_by_distance计算完topo之后，每个seleted_device都找到了自己最近的nic，所以我们在最近的基础上去找隔壁的，大致逻辑就是：gpu1选的是nic1，我现在去让gpu1的seleted_devices[1]的位置存现在的backup的id，原来的seleted_devices[0]还是存它的主设备的id。这样所有gpu的device都是两个。
+知道原理后，在nvshmemi_get_devices_by_distance计算完topo之后，每个seleted_device都找到了自己最近的nic，所以我们在最近的基础上去找隔壁的，大致逻辑就是：gpu1选的是nic1，我现在去让gpu1的seleted_devices[1]的位置存现在的backup的id，原来的seleted_devices[0]还是存它的主设备的id。这样所有gpu的device都是两个
 ```cpp
 if (ibgda_backup && found_devices > 0 && found_devices < max_devices_per_pe) {
             const int backup_dev =
@@ -461,7 +459,7 @@ if (ibgda_backup && found_devices > 0 && found_devices < max_devices_per_pe) {
             }
         }
 ```
-选择backup的id则通过偶数+1，奇数-1去互相备份选择设备.
+选择backup的id则通过偶数+1，奇数-1去互相备份选择设备。
 ```cpp
 static int nvshmemi_pick_adjacent_nic(int primary, int total) {
     if (total < 2 || primary < 0) return -1;
@@ -476,10 +474,105 @@ static int nvshmemi_pick_adjacent_nic(int primary, int total) {
 现在可以看到selected_devices的选择变成2，那么每个gpu执行到 `status = tcurr->host_ops.connect_endpoints(tcurr, selected_devices, found_devices);`  的时候就可以拿到这里我提前计算好主和备网卡id的数组。测试如下：
 ![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251204161310418.png)
 
-- [ ] 在某个gpu上能看到两张网卡之后，建立备份QP的逻辑难点？
+回过头来思考了一下，`nvshmemi_get_devices_by_distance` 为什么只选一张最近网卡，难道nvshmem不支持选择多个网卡吗？ 结论：支持，前提就是当前NIC数少于GPU数或者所有同距离NIC已经满了。
+在该函数的实现里面，nvshmem直接暴力获取所有gpu和NIC的sysfs路径。在`get_pci_distance` 去根据公共的前缀 / NUMA节点把网卡标记为（pix/ pxb / phb / node/ sys / count），`pci_distance_perf[]` 给出“越近数值越大”的评分。`pe_dev_pairs` 会存所有 (PE, NIC, distance) 组合，并按 distance 从近到远排序（比较的是枚举值）。再由两次for loop去找到当前GPU最优NIC和平衡一个NIC被多个GPU绑定。最终用 `mype_array_index` 把本GPU的槽位写到输出的* device_arr指针。大致核心代码如下：
+```cpp
+int nvshmemi_get_devices_by_distance(int *device_arr, int max_dev_per_pe,
+                                     struct nvshmem_transport *tcurr) {
+    status = get_cuda_bus_id(gpu_device_id, gpu_info.gpu_bus_id);
+    for (i = 0; i < n_pes; i++) {
+        status = get_device_path(gpu_info_all[i].gpu_bus_id, &cuda_device_paths[pe_id]);
+        if (i == mype) {
+            mype_array_index = pe_id * max_dev_per_pe;
+        }
+    }
+    for (pe_id = 0; pe_id < n_pes_node; pe_id++) {
+        for (dev_id = 0; dev_id < ndev; dev_id++) {
+            distance_compare =
+                get_pci_distance(cuda_device_paths[pe_id], dev_info_all[dev_id].dev_path);
+                pe_dev_pairs.push_front({pe_id, dev_id, distance_compare});
+            // ...
+        }
+    }
+    /* 
+        loop one, do initial assignments of NIC(s) to each GPU 
+        把“最优距离”的 NIC 先分给每个 GPU，结果可能出现多 GPU 共用同一 NIC（used_devs[nic] > 1）。
+    */
+    for (pairs_iter = pe_dev_pairs.begin(); pairs_iter != pe_dev_pairs.end(); pairs_iter++) {
+        // 在“初次分配”阶段只要遇到比当前 best 更差的距离就直接把后续槽位写成 -2
+        if (pci_distance_perf[new_distance] < pci_distance_perf[pe_device_distance[pe_base_index]]) {
+            // 把剩余的 slots 全部标成 -2
+            for (; pe_pair_index < max_dev_per_pe; pe_pair_index++) {
+                pe_selected_devices[pe_base_index + pe_pair_index] = PE_DEVICE_NO_OPTIMAL_ASSIGNMENT;
+            }
+        } else {
+            pe_selected_devices[pe_base_index + pe_pair_index] = (*pairs_iter).dev_idx;
+            pe_device_distance[pe_base_index + pe_pair_index] = (*pairs_iter).pcie_distance;
+            used_devs[(*pairs_iter).dev_idx]++;
+        }
+    }
+    
+    /* 
+        loop two, load balance the NICs. 
+        这里只处理前面的used_devs[current_nic]>=2的情况，就回去pe_dev_pairs再找当前GPU其他可选NIC
+    */
+    for (pe_id = 0; pe_id < n_pes_node * max_dev_per_pe; pe_id++) {
+        // 1. pci_distance_perf[new_distance] >= pci_distance_perf[current_distance]，距离不比现有更差；
+        // 2. nic_density - used_devs[new_nic] >= 2，意即新 NIC 至少比旧 NIC 空两倍（旧的多人共享，新的相对空闲）。
+        // .....
+    }
+    for (pe_pair_index = 0; pe_pair_index < max_dev_per_pe; pe_pair_index++) {
+        if (pe_selected_devices[mype_array_index + pe_pair_index] >= 0) {
+            mydev_index = pe_selected_devices[mype_array_index + pe_pair_index];
+            device_arr[pe_pair_index] = mydev_index;
+        }
+    }
+}
+```
+### 5.2 创建备份QP
+在 `nvshmemt_ibgda_connect_endpoints`内我们根据selected_dev_ids已经知道主nic和备份nic，现在就是去备份nic上创建backup QP。在调用 `ibgda_create_qp`给备份nic创建QP的时候，`mapped_i`  使用的和主的mapped_i的索引一致。在 `ibgda_get_rc_handle` 内会从backup_eps内拿到qpn和gid（spn+iid），从device内拿到lid，用于后面alltoall交换。交换后每个QP开始设置状态rst->init->rtr->rts，整体流程抽象如下：
+```cpp
+status = ibgda_create_cq_shared_objects(ibgda_state, backup_device, n_pes);
+status = ibgda_create_qp_shared_objects(ibgda_state, backup_device, n_pes);
+for (int rc_idx = 0; rc_idx < num_rc_eps_backup; ++rc_idx) {
+    int dst_pe = (rc_idx + 1 + mype) % n_pes;
+    int offset = rc_idx / n_pes;
+    int mapped_i = dst_pe * num_rc_eps_per_pe + offset;
+    if (dst_pe == mype) {
+        continue;
+    }
+    
+    status = ibgda_create_qp(&primary_device_ref->rc.backup_eps[mapped_i],
+                             backup_device, backup_portid, mapped_i,
+                             NVSHMEMI_IBGDA_DEVICE_QP_TYPE_RC);
+    status = ibgda_get_rc_handle(&backup_rc_handles_tmp[mapped_i],
+                                 primary_device_ref->rc.backup_eps[mapped_i],
+                                 backup_device);
+}
 
-- [ ] 备份QP在另一个NIC上，主设备的MR不能直接用于备份QP，所以怎么去给备份设备的PD上注册自己MR？以及Lkey和Rkey的部分应该怎么设计？
+for (int rc_idx = 0; rc_idx < num_rc_eps_backup; ++rc_idx) {
+    if (rc_idx / num_rc_eps_per_pe == mype) {
+        continue;
+    }
+    status = ibgda_qp_rst2init(primary_device_ref->rc.backup_eps[rc_idx],
+                               backup_device, backup_portid);
+    status = ibgda_rc_init2rtr(ibgda_state, primary_device_ref->rc.backup_eps[rc_idx],
+                               backup_device, backup_portid,
+                               &primary_device_ref->rc.backup_peer_ep_handles[rc_idx]);
+    status = ibgda_qp_rtr2rts(primary_device_ref->rc.backup_eps[rc_idx],
+                              backup_device, backup_portid);
+}
+```
+> [!当 mype=0 时遍历 rc=0, 1,2,3：] 
+rc=0 → dst_pe=1, offset=0, mapped_i = 1 * 2 + 0 = 2
+rc=1 → dst_pe=0（同 PE，直接 continue）
+rc=2 → dst_pe=1, offset=1, mapped_i = 1 * 2+1 = 3
+rc=3 → dst_pe=0（同 PE，直接 continue）
 
+打印看到：
+![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251208153427330.png)
+
+### 5.3 备份QP在另一个NIC上，主设备的MR不能直接用于备份QP，所以怎么去给备份设备的PD上注册自己MR？以及lkey和rkey的部分应该怎么设计？
 在 `ibgda_mem_handle` 内增加对应的备份MR的需要的字段如下：
 ```cpp
 struct ibgda_mem_handle {
@@ -522,7 +615,6 @@ mr = ftable->reg_dmabuf_mr(pd, 0, size_aligned, (uint64_t)p, handle->fd,
 通过以上的方法在两个gpu上打印日志看到可以看到gpu都用了nic1的PD注册了当前GPU显存的MR。
 ![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251204221559808.png)
 在 `reg_dmabuf_mr` 内注册了MR后（handle内主和备的`dev_mem_handles`和`backup_dev_mem_handles`）会拿到lkey和rkey，我们对应的需要去拓展他们的表来存备份设备的key。备份QP需要的lkey和rkey按照`n_dev_seleted`往后的区域索引。
-
 主和备份的mr的lkey还在 `nvshmemt_ibgda_get_mem_handle` 内，依次把这两个lkey填写到ibgda_device_lkeys内。后续nvshmem会把分别放到cpu侧的`ibgda_device_state->constmem.lkeys`内，以及gpu侧的`ibgda_device_state->globalmem.lkeys`。主备的rkey则在 `nvshmemt_ibgda_add_device_remote_mem_handles` 内拓展，所有逻辑和lkey一致，lkey的拓展逻辑如下。
 ```cpp
 // 原来: 表大小为 num_chunks * n_devs_selected，只写主设备 lkey
@@ -563,7 +655,6 @@ int nvshmemi_mem_remote_transport::gather_mem_handles(nvshmemi_symmetric_heap &o
                                                       uint64_t heap_offset, size_t size,
                                                       bool ext_allocation) {
     int status = 0;
-
     NVSHMEMU_FOR_EACH(i, obj.get_state()->num_initialized_transports) {
         nvshmem_transport_t tcurr = obj.get_state()->transports[i];
         if (NVSHMEMU_IS_BIT_SET(obj.get_state()->transport_bitmap, i) &&
@@ -580,7 +671,7 @@ int nvshmemi_mem_remote_transport::gather_mem_handles(nvshmemi_symmetric_heap &o
 ```
 
 
-
+- [ ] 去看consmem前10和globalmem的lkey索引是否正确
 - [ ] RDMA 操作是异步的，CQE 可能还没生成，这个时候去nvshmemi_ibgda_check_cq导致超时？需要看看为啥主的QP会被判定为故障
 
 
@@ -589,4 +680,5 @@ int nvshmemi_mem_remote_transport::gather_mem_handles(nvshmemi_symmetric_heap &o
 # log
 - [x] Fixing NVSHMEM memory issue ✅ 2025-12-03
 - [x] 修改后的DeepEP python能链接到修改后的deepep和nvshmem的c++代码。 ✅ 2025-11-28
-- [ ] 设置num_selected_devs为2
+- [x] 设置num_selected_devs为2  ✅ 2025-12-06
+- [ ] 
