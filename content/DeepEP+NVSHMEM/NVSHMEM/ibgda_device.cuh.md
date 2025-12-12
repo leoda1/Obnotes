@@ -112,7 +112,7 @@ __device__ static __forceinline__ nvshmemi_ibgda_device_qp_t* ibgda_get_rc(int p
 	    .rcs[pe * num_rc_per_pe * state->num_devices_initialized + id % (num_rc_per_pe * state->num_devices_initialized)];
 }
 ```
-核心逻辑就是 `pe * num_rc_per_pe * state->num_devices_initialized + id % (num_rc_per_pe * state->num_devices_initialized`
+核心逻辑就是 `pe * num_rc_per_pe * state->num_devices_initialized + id % (num_rc_per_pe * state->num_devices_initialized`。
 * 基址就是：其中num_rc_per_pe * state->num_devices_initialized表示**一个pe上的RC QP数量和当前已经初始化了多少个网口(device)相乘，算出了一个pe一共的QP总数**。接着用pe乘以这个总数就可以拿到目标pe在rcs数组上的**起始基地址**。
 * 偏移：加号后面就是在目标pe的QP的区间选择一个QP，已经传了id进来，所以直接%了前面算出来的一个pe的QP总数就可以在这个区间内选择QP了。
 
