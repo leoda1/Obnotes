@@ -1,3 +1,5 @@
+## 0 前言
+
 ## 1. nvshmemi_ibgda_put_nbi_warp
 ### 函数签名
 ```cpp
@@ -13,9 +15,11 @@ __device__ static __forceinline__ void nvshmemi_ibgda_put_nbi_warp(
 * lane_id ← lane_id（warp 中的 lane，0..31）。内部把不同 lane 用来并行构造多条 WQE（把大消息分 chunk 并分配给 lanes）。
 * message_idx ← slot_idx（或在 combine/send 场景中传 token_idx - offset 作为消息索引）。该参数被传给 ibgda_submit_requests 用于决定何时调用 doorbell（post send）策略 / 批次逻辑。
 ### 传输
-首先就是会把数据分块，一次 RDMA 操作不能跨越不同的 MR。把总的bytes数按照[ibgda_get_lkey_and_rkey](##2.ibgda_get_lkey_and_rkey)的规则来切分。
+首先就是准备QP（这里get RC的操作就是去拿QP，具体见 [[#6. ibgda_get_rc]]），再会把数据分块，一次 RDMA 操作不能跨越不同的 MR。把总的bytes数按照 [[#3. ibgda_get_lkey_and_rkey]]的规则来切分。
 ```cpp
-auto remaining_bytes = bytes;
+__device__ static __forceinline__ void nvshmemi_ibgda_put_nbi_warp(...) {
+    auto qp = ibgda_get_rc(dst_pe, qp_id);
+    auto remaining_bytes = bytes;
     while (remaining_bytes > 0) {
         if (lane_id == num_wqes) {
             my_chunk_size = min(remaining_bytes,
@@ -29,28 +33,29 @@ auto remaining_bytes = bytes;
         req_rptr += chunk_size;
         ++num_wqes;// WQE 数量 +1
     }
+}
 ```
 接着，开始构造每个WQE，见[ibgda_write_rdma_write_wqe](##3.ibgda_write_rdma_write_wqe)实现。
 ```cpp
-uint64_t base_wqe_idx = 0;
-if (lane_id == 0)
-    base_wqe_idx = ibgda_reserve_wqe_slots(qp, num_wqes);  // 预留连续的 WQE 槽位
-base_wqe_idx = __shfl_sync(0xffffffff, base_wqe_idx, 0);   // 广播给所有 lanes
-
-if (lane_id < num_wqes) {
-    auto wqe_idx = base_wqe_idx + lane_id;
-    auto wqe_ptr = ibgda_get_wqe_ptr(qp, wqe_idx);  // 获取 WQE 的内存地址
-    ibgda_write_rdma_write_wqe(
-        qp, 
-        my_laddr, my_lkey,      // 本地地址 + lkey
-        my_raddr, my_rkey,      // 远程地址 + rkey
-        my_chunk_size,          // 传输字节数
-        wqe_idx,                // WQE 索引
-        &wqe_ptr                // WQE 内存地址
-    );
+    uint64_t base_wqe_idx = 0;
+    if (lane_id == 0)
+        base_wqe_idx = ibgda_reserve_wqe_slots(qp, num_wqes);  // 预留连续的 WQE 槽位
+    base_wqe_idx = __shfl_sync(0xffffffff, base_wqe_idx, 0);   // 广播给所有 lanes
+    
+    if (lane_id < num_wqes) {
+        auto wqe_idx = base_wqe_idx + lane_id;
+        auto wqe_ptr = ibgda_get_wqe_ptr(qp, wqe_idx);  // 获取 WQE 的内存地址
+        ibgda_write_rdma_write_wqe(
+            qp, 
+            my_laddr, my_lkey,      // 本地地址 + lkey
+            my_raddr, my_rkey,      // 远程地址 + rkey
+            my_chunk_size,          // 传输字节数
+            wqe_idx,                // WQE 索引
+            &wqe_ptr                // WQE 内存地址
+        );
 }
 ```
-构造完毕后，会用syncwarp，同步每个warp。每个warp的第一个线程把所有WQE提交给rdma，详细见[ibgda_submit_requests](##4.ibgda_submit_requests)：
+构造完毕后，会用syncwarp，同步每个warp。每个warp的第一个线程把所有WQE提交给rdma，详细见[ibgda_submit_requests](##4.ibgda_submit_requests)
 ```cpp
 if (lane_id == 0)
         ibgda_submit_requests<kAlwaysDoPostSend>(qp, base_wqe_idx, num_wqes, message_idx);
@@ -116,10 +121,37 @@ if (lane_id == 0)
         └───────────────────────────┘
 ```
 
-## 2. ibgda_get_lkey_and_rkey
+## 2. nvshmemi_ibgda_amo_nonfetch_add
+设备端通过IBGDA RC QP发起的 “不取值” 的原子加法（atomic operation no fetch add），常用于远程直接访问内存。
+* 如果是本地的拷贝，说明rptr是本地的指针，直接在本地就执行加法操作。
+* 远程操作的话，找到目标pe的QP，然后拿到需要的rkey和raddr。
+* ibgda_reserve_wqe_slots会去拿qp->mvars->tx_wq.resv_head，这个就是发送队列（TX WQ）的“预留”，表示一个warp还没写完的WQE索引。你在就是要写新的WQE就需要去原子地把resv_head 向前推进 1 。并拿回返回值作为新的WQE起始索引。
+* 写入AMO请求`ibgda_write_amo_add_wqe`，将目标内存的 rptr 地址和加法的 value 传递给 RDMA 设备，触发远程加法操作。
+* 最后，提交 wr给RDMA，实际执行加法操作。
+```cpp
+__device__ __forceinline__ void nvshmemi_ibgda_amo_nonfetch_add(
+    void* rptr, const int& value, int pe, int qp_id, bool is_local_copy = false) {
+    if (is_local_copy) {
+        atomicAdd(static_cast<unsigned long long*>(rptr), value);
+    } else {
+        nvshmemi_ibgda_device_qp_t* qp = ibgda_get_rc(pe, qp_id);
+
+        __be32 rkey;
+        uint64_t raddr;
+        ibgda_get_rkey(reinterpret_cast<uint64_t>(rptr), pe, &raddr, &rkey, qp->dev_idx);
+
+        uint64_t my_wqe_idx = ibgda_reserve_wqe_slots(qp, 1);
+        void* wqe_ptrs = ibgda_get_wqe_ptr(qp, my_wqe_idx);
+
+        ibgda_write_amo_add_wqe(qp, value, reinterpret_cast<uint64_t>(qp->ibuf.buf), qp->ibuf.lkey, raddr, rkey, my_wqe_idx, &wqe_ptrs);
+
+        ibgda_submit_requests<true>(qp, my_wqe_idx, 1);
+}
+```
+## 3. ibgda_get_lkey_and_rkey
 输入本地和远程的VA，拿到lkey,rkey,物理地址和chunksize。
 
-## 3. ibgda_write_rdma_write_wqe
+## 4. ibgda_write_rdma_write_wqe
 填充对端的字段：
 ```cpp
 raddr_seg.raddr = HtoBE64(raddr);  // 远程物理地址（大端序）
@@ -143,7 +175,7 @@ st_na_relaxed(reinterpret_cast<int4*>(ctrl_seg_ptr), *reinterpret_cast<const int
     st_na_relaxed(reinterpret_cast<int4*>(raddr_seg_ptr), *reinterpret_cast<const int4*>(&raddr_seg));
     st_na_relaxed(reinterpret_cast<int4*>(data_seg_ptr), *reinterpret_cast<const int4*>(&data_seg));
 ```
-## 4. ibgda_submit_requests
+## 5. ibgda_submit_requests
 step1:内存屏障
 ```cpp
 __threadfence();  // 确保所有 WQE 写入对 NIC 可见
@@ -179,5 +211,15 @@ __device__ static __forceinline__ void ibgda_post_send(nvshmemi_ibgda_device_qp_
         ibgda_ring_db(qp, new_prod_idx);
     }
     ibgda_lock_release(&mvars->post_send_lock);
+}
+```
+## 6. ibgda_get_rc
+选择rc的主要因素是pe和qp_id，nvshmem内在 `nvshmemi_ibgda_device_state_t` 结构体内的 `globalmem` 结构体内有所有PE，所有RC，所有GPU的QP顺序排好的数组rcs。
+```cpp
+__device__ static __forceinline__ nvshmemi_ibgda_device_qp_t* ibgda_get_rc(int pe, int id) {
+    auto state = ibgda_get_state();
+    const auto num_rc_per_pe = ibgda_get_state()->num_rc_per_pe;
+    return &state->globalmem
+                .rcs[pe * num_rc_per_pe * state->num_devices_initialized + id % (num_rc_per_pe * state->num_devices_initialized)];
 }
 ```

@@ -1,28 +1,28 @@
 # 1. 从网卡侧down port：
-
 **看当前网卡是单口还是双口：**
-
-```bash
+```shell
 ls /sys/class/infiniband/mlx5_*/ports/
 ```
-
 扫一下当前网卡设备信息：
-
-```bash
+```shell
 ibstat
 ip link
 ```
-
 down和up某个网卡的口：
+```shell
+# 如果网卡ibstat后看到是Link layer: Ethernet
+# 使用ip link去down这个网卡 例如：mlx5_0 port 1 ==> enp25s0np0 (Up)就是
+ip link set enp25s0np0 down
+ip link set enp25s0np0 up
+# 或者
+ifconfig enp25s0np0 down
+ifconfig enp25s0np0 up
 
-```bash
-# down ip link
-ip link set eth0 down
-ip link set eth0 up
-# down Mellanox
+
+# 如果网卡ibstat后看到是Link layer:Infiniband
 ibportstate mlx5_0 1 down
 ibportstate mlx5_0 1 up
-# down IB
+# 或者
 ifconfig ib0 down
 ifconfig ib0 up
 # use mst 
@@ -39,16 +39,14 @@ done
 # check success / fault
 ip link show eth0
 ```
-
 # 2. 从交换机down
-
 ## 2.1 Infiniband
 以down 10.200.88.173 上的mlx5_gdr_0为例
 在服务器上
 ```shell
 iblinkinfo | grep "10-200-88-173" 
 ```
-或
+或：
 ```shell
 iblinkinfo | grep "node073"
 ```
@@ -66,10 +64,9 @@ ssh -o HostKeyAlgorithms=+ssh-rsa admin@172.171.2.201
 enable
 
 ```
-随后查看端口情况
+随后查看端口情况：
 ```
 show lldp neighbors
-
 ```
 ![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251118205330583.png)
 随后执行
