@@ -12,4 +12,10 @@ title: Home
 - **[[Megatron/index|Megatron]]** - LLM训练和优化
 - **[[Parallel Thread Execution(PTX) Programming Guide|PTX]]** - 并行线程执行汇编
 - **[[Big Feature/index|Big Feature]]** - 公司/自己的R&D project
-
+<iframe
+  src="/static/mapbox/index.html"
+  style="width: 100%; height: 420px; border: 0;"
+  loading="lazy"
+  referrerpolicy="no-referrer"
+  title="Mapbox Map"
+></iframe>

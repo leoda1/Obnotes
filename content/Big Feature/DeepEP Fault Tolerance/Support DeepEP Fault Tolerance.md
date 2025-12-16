@@ -722,6 +722,8 @@ for (int j = 0; j < n_devs_selected; j++) {
 ```
 ### 5.5 怎么设计一个高效的cq检查
 在只使用primary QP / backup QP都能完成deepep的internode ibgda后，写了第一版本出故障后切到backup QP发送数据的逻辑。就是直接看当前这次QP的wqe是否前进了，超时拿不到cq就直接用backup的rc重新准备wqe再下wr和amo操作。然后就hang了。。。
+初步怀疑：
+a. 
 
 在deepep的ibgda_device.cuh内，定义了一个 `nvshmemi_ibgda_quiet` 函数，让一些线程去检查primary NIC的cq完成状态。当我们主的down了之后，首先就需要它能够stop to check primary NIC cq status。so：
 1. 超时宣告该QP已经fail，后续走backup。

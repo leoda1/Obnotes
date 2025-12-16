@@ -39,6 +39,12 @@ done
 # check success / fault
 ip link show eth0
 ```
+> [!tips]
+> 出现gid index乱跳 说明down/up后会触发RDMA COre重新扫描net dev / 重新建立GID table，用下面指令去冻结：
+> ```shell
+> systemctl stop systemd-networkd.socket
+> systemctl stop systemd-networkd.service
+> ```
 # 2. 从交换机down
 ## 2.1 Infiniband
 以down 10.200.88.173 上的mlx5_gdr_0为例
