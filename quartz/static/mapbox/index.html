@@ -18,10 +18,74 @@
         width: 100%;
         height: 100%;
       }
+      /* Hide all Mapbox UI controls (attribution, logo, etc.).
+         Note: this may violate Mapbox attribution requirements. */
+      .mapboxgl-ctrl-top-left,
+      .mapboxgl-ctrl-top-right,
+      .mapboxgl-ctrl-bottom-left,
+      .mapboxgl-ctrl-bottom-right {
+        display: none !important;
+      }
+
+      .pin {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        border: 2px solid #111;
+        box-sizing: border-box;
+      }
+      .pin--work {
+        background: #22c55e;
+      }
+      .pin--travel {
+        background: #eab308;
+      }
+
+      #legend {
+        position: absolute;
+        right: 8px;
+        bottom: 8px;
+        font: 12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        color: #111;
+        background: rgba(255, 255, 255, 0.75);
+        padding: 4px 6px;
+        border-radius: 4px;
+        white-space: nowrap;
+      }
+      #legend .swatch {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border: 1px solid #111;
+        border-radius: 2px;
+        vertical-align: -1px;
+        margin: 0 4px;
+      }
+      #legend .swatch.work {
+        background: #22c55e;
+      }
+      #legend .swatch.travel {
+        background: #eab308;
+      }
     </style>
   </head>
   <body>
     <div id="map"></div>
+
+    <script type="application/json" id="pins">
+      {
+        "work": [
+          { "name": "2019-2025 北京", "coords": [116.407387, 39.904202] },
+          { "name": "2018-2019 安徽", "coords": [117.227239, 31.820586] },
+          { "name": "2025.12 武汉", "coords": [114.2999353, 30.5951051] },
+          { "name": "2022.6 杭州", "coords": [120.2052342, 30.2489634] },
+          { "name": "2001.11-2018 上海", "coords": [121.4692071, 31.2322758] }
+        ],
+        "travel": [{ "name": "2023.10 新加坡", "coords": [103.851959, 1.29027] }]
+      }
+    </script>
+
+    <div id="legend">work <span class="swatch work" aria-label="#22c55e"></span> travel <span class="swatch travel" aria-label="#eab308"></span></div>
     <script>
       // NOTE: Use a PUBLIC token (pk.*) in browser code.
       // Replace the value below with your own Mapbox public token.
@@ -30,21 +94,43 @@
       const map = new mapboxgl.Map({
         container: "map",
         style: "mapbox://styles/mapbox/standard",
-        projection: "globe",
         zoom: 1,
         center: [30, 15],
+        attributionControl: false,
       });
 
-      map.addControl(new mapboxgl.NavigationControl());
-      map.scrollZoom.disable();
+      let pinsByType = {};
+      try {
+        const pinsEl = document.getElementById("pins");
+        const raw = pinsEl ? pinsEl.textContent : "{}";
+        pinsByType = raw ? JSON.parse(raw) : {};
+      } catch (e) {
+        console.warn("Invalid pins JSON", e);
+        pinsByType = {};
+      }
 
-      map.on("error", (e) => {
-        console.error("Mapbox error:", e?.error ?? e);
-      });
+      for (const [type, pins] of Object.entries(pinsByType)) {
+        if (!Array.isArray(pins)) continue;
+        for (const pin of pins) {
+          const coords = pin?.coords;
+          if (!Array.isArray(coords) || coords.length !== 2) continue;
+          const lng = Number(coords[0]);
+          const lat = Number(coords[1]);
+          if (!Number.isFinite(lng) || !Number.isFinite(lat)) continue;
+          // Guard against swapped / invalid coordinates so one bad pin doesn't break all.
+          if (lng < -180 || lng > 180 || lat < -90 || lat > 90) continue;
 
-      map.on("style.load", () => {
-        map.setFog({});
-      });
+          try {
+            const m = document.createElement("div");
+            m.className = `pin pin--${type}`;
+            if (pin?.name) m.title = String(pin.name);
+
+            new mapboxgl.Marker({ element: m }).setLngLat([lng, lat]).addTo(map);
+          } catch {
+            // ignore bad pin
+          }
+        }
+      }
     </script>
   </body>
 </html>
