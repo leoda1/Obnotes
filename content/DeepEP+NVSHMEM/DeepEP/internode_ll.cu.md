@@ -66,44 +66,44 @@ const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
 * `dst_ptr`：这个 token 对应的消息，落在对方 rank 的“第几个 expert 的 buffer 里的第几个 slot 上”的地址偏移，逻辑上就是`rdma_recv_x[expert_local_idx][src_rank][slot_idx]`这个三维地址（nvshmem的对称内存有个相同的base）转成一维的地址。
 完成传输后增加atomic_finish_counter_per_expert数。
 ```cpp
-for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
-    for (int i = thread_id; i < hidden_bf16_int4; i += num_threads) {
-	    // 1. FP8 量化（如果启用）
-	    if constexpr (kUseFP8) {
-	        // 按 128 通道计算 amax
-	        // 计算 scale 和 scale_inv
-	        // 将 BF16 转换为 FP8
-	    }
-	}
-    
-    // 2. 根据 topk_idx 确定目标 expert 和 rank
-    auto dst_expert_idx = topk_idx + token_idx * num_topk + warp_id;
-    auto dst_rank = dst_expert_idx / num_local_experts;
-    
-    // 3. 原子获取目标 buffer 的槽位
-    int slot_idx = lane_id == 0 ? atomicAdd(atomic_counter_per_expert + dst_expert_idx, 1);
-    slot_idx = __shfl_sync(0xffffffff, slot_idx, 0);
-    const auto dst_rank = dst_expert_idx / num_local_experts;
-    const auto dst_expert_local_idx = dst_expert_idx % num_local_experts;
-    const auto src_ptr = reinterpret_cast<uint64_t>(rdma_x_src_idx);
-    const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) 
-                    + dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_msg //对端进程的第dst_expert_local_idx个专家的块
-                    + rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg //在该专家块内，按源 rank（也就是当前发送者的 rank）划分子块，保证来自不同源 rank 的数据互不冲突。
-                    + slot_idx * num_bytes_per_msg; //这个 rank 下排入第几个 token 位
-    const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-    // 4. 发送数据（RDMA 或 P2P）
-    if (dst_p2p_ptr == 0) {
-        // 跨节点: 使用 RDMA
-        nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, num_bytes_per_msg,
-	 	  dst_rank, dst_expert_local_idx, lane_id, slot_idx);
-    } else {
-        // 节点内: 使用 NVLink P2P 直接内存拷贝
-        UNROLLED_WARP_COPY(...);
+LOW_LATENCY_DISPATCH_SEND:
+    for (int token_idx = sm_id; token_idx < num_tokens; token_idx += num_sms) {
+        for (int i = thread_id; i < hidden_bf16_int4; i += num_threads) {
+    	    // 1. FP8 量化（如果启用）
+    	    if constexpr (kUseFP8) {
+    	        // 按 128 通道计算 amax
+    	        // 计算 scale 和 scale_inv
+    	        // 将 BF16 转换为 FP8
+    	    }
+    	}
+        
+        // 2. 根据 topk_idx 确定目标 expert 和 rank
+        auto dst_expert_idx = topk_idx + token_idx * num_topk + warp_id;
+        auto dst_rank = dst_expert_idx / num_local_experts;
+        
+        // 3. 原子获取目标 buffer 的槽位
+        int slot_idx = lane_id == 0 ? atomicAdd(atomic_counter_per_expert + dst_expert_idx, 1);
+        slot_idx = __shfl_sync(0xffffffff, slot_idx, 0);
+        const auto dst_rank = dst_expert_idx / num_local_experts;
+        const auto dst_expert_local_idx = dst_expert_idx % num_local_experts;
+        const auto src_ptr = reinterpret_cast<uint64_t>(rdma_x_src_idx);
+        const auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_x) 
+                        + dst_expert_local_idx * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_msg //对端进程的第dst_expert_local_idx个专家的块
+                        + rank * num_max_dispatch_tokens_per_rank * num_bytes_per_msg //在该专家块内，按源 rank（也就是当前发送者的 rank）划分子块，保证来自不同源 rank 的数据互不冲突。
+                        + slot_idx * num_bytes_per_msg; //这个 rank 下排入第几个 token 位
+        const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+        // 4. 发送数据（RDMA 或 P2P）
+        if (dst_p2p_ptr == 0) {
+            // 跨节点: 使用 RDMA
+            nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
+        } else {
+            // 节点内: 使用 NVLink P2P 直接内存拷贝
+            UNROLLED_WARP_COPY(...);
+        }
+        
+        // 5. 完成后增加计数器
+        atomic_add_release_global(atomic_finish_counter_per_expert + dst_expert_idx, 1);
     }
-    
-    // 5. 完成后增加计数器
-    atomic_add_release_global(atomic_finish_counter_per_expert + dst_expert_idx, 1);
-}
 ```
 与此同时，第一个sm的最后一个warp负责清理缓冲区，其他sm上的最后一个warp内在统计当前已经发送完的数据：
 ```cpp
@@ -161,31 +161,32 @@ if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
 ### 1.3 接收流程
 每个sm上的warp group 1的第一个线程负责等待数据，数据到了每个warp group内的所有线程就会来复制数据。
 ```cpp
-// Sub-warp 1: 等待数据到达
-if (sub_warp_id == 1 and lane_id == 0) {
-    // 轮询等待 rdma_recv_count 变为非零（负数）
-    while ((num_recv_tokens = ld_acquire_sys_global(
-                rdma_recv_count + local_expert_idx * num_ranks + src_rank)) == 0
-           && wait_cost <= NUM_TIMEOUT_CYCLES);
-    
-    // 超时处理：mask 掉故障节点
-    if (wait_recv_cost > NUM_TIMEOUT_CYCLES) {
-        atomicExch(mask_buffer_ptr + src_rank, 1);
+LOW_LATENCY_DISPATCH_RECV:
+    // Sub-warp 1: 等待数据到达
+    if (sub_warp_id == 1 and lane_id == 0) {
+        // 轮询等待 rdma_recv_count 变为非零（负数）
+        while ((num_recv_tokens = ld_acquire_sys_global(
+                    rdma_recv_count + local_expert_idx * num_ranks + src_rank)) == 0
+               && wait_cost <= NUM_TIMEOUT_CYCLES);
+        
+        // 超时处理：mask 掉故障节点
+        if (wait_recv_cost > NUM_TIMEOUT_CYCLES) {
+            atomicExch(mask_buffer_ptr + src_rank, 1);
+        }
+        
+        // 解码 token 数量
+        num_recv_tokens = -num_recv_tokens - 1;
+        
+        // 原子获取写入位置
+        recv_token_begin_idx = atomicAdd(packed_recv_count + local_expert_idx, num_recv_tokens);
     }
     
-    // 解码 token 数量
-    num_recv_tokens = -num_recv_tokens - 1;
-    
-    // 原子获取写入位置
-    recv_token_begin_idx = atomicAdd(packed_recv_count + local_expert_idx, num_recv_tokens);
-}
-
-// 所有 sub-warps: 复制 token 数据
-for (int i = sub_warp_id; i < num_recv_tokens; i += num_warps_per_group) {
-    // 复制 source info
-    // 复制 hidden states（BF16 或 FP8）
-    // 复制 FP8 scales（如果启用）
-}
+    // 所有 sub-warps: 复制 token 数据
+    for (int i = sub_warp_id; i < num_recv_tokens; i += num_warps_per_group) {
+        // 复制 source info
+        // 复制 hidden states（BF16 或 FP8）
+        // 复制 FP8 scales（如果启用）
+    }
 ```
 ### 1.4 量化策略
 这个是send阶段会做的事，如果量化了，除了FP8的数据传输，还得把这里的scale也传走。
