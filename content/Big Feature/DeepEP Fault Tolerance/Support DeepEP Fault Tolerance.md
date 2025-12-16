@@ -745,4 +745,5 @@ a.
 - [x] 设置num_selected_devs为2  ✅ 2025-12-06
 - [x] 修复primary+backup切换到backup NIC上的QP发送数据测试✅ 2025-12-08
 - [x] 修复backup rc退出destory的coredump✅ 2025-12-09
-- [ ] 修复物理down口时 重新计算backup rc的时候 索引到backup QP但是使用的是primary NIC的QPN❌ 2025-12-10
+- [x] 修复物理down口时 重新计算backup rc的时候 索引到backup QP但是使用的是primary NIC的QPN✅ 2025-12-10
+- [ ] 修复物理down口时 现在的nvshmemi_ibgda_check_cq为什么会在low_latency和normal下表现出超时/没问题 但是切换都不对的问题
