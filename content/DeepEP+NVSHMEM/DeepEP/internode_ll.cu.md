@@ -59,7 +59,6 @@ const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
 | warp_group_id              | warp所在的group的index        | warp_id / num_warps_per_group              | ～=8 |
 | sub_warp_id                | warp在一个warp group内的index  | warp_id % num_warps_per_group              | ～=3 |
 | responsible_exp<br>ert_idx | warp group负责的expert的index | sm_id * num_warp_groups<br>+ warp_group_id |     |
-
 在前num_warps - 1个warp计算完后会调用nvshmem封装的ibgda的传输数据的接口，见[[DeepEP+NVSHMEM/DeepEP/ibgda_device.cuh]] 内的说明。传输前准备了几个参数：
 * `dst_expert_idx`：在不同warp执行代码的时候会去读该 token 的第 `warp_id` 个 topk 值，作为 `dst_expert_idx`
 * `slots_idx`: 每个warp的第一个线程计算`atomic_counter_per_expert + dst_expert_idx`然后`_shfl_sync`来广播给warp内其他31个线程。slots idx就是本次发送消息给专家x的某个槽
@@ -94,68 +93,96 @@ LOW_LATENCY_DISPATCH_SEND:
         const auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
         // 4. 发送数据（RDMA 或 P2P）
         if (dst_p2p_ptr == 0) {
-            // 跨节点: 使用 RDMA
-            nvshmemi_ibgda_put_nbi_warp(dst_ptr, src_ptr, num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
+            sm_id == 0 ? printf("[1]sm_id run into put_nbi == 0\n") : 0;
+            nvshmemi_ibgda_put_nbi_warp<true>(dst_ptr, src_ptr, num_bytes_per_msg, dst_rank, dst_expert_local_idx, lane_id, slot_idx);
         } else {
-            // 节点内: 使用 NVLink P2P 直接内存拷贝
-            UNROLLED_WARP_COPY(...);
+            // NOTES: only 2 load iterations for 7K hidden with 8 unrolls
+            const auto* src_int4_ptr = reinterpret_cast<const int4*>(src_ptr);
+            const auto* dst_int4_ptr = reinterpret_cast<int4*>(dst_p2p_ptr);
+            UNROLLED_WARP_COPY(8, lane_id, num_int4_per_msg, dst_int4_ptr, src_int4_ptr, ld_nc_global, st_na_global);
+            sm_id == 0 ? printf("[2]sm_id run into nvlink == 0\n") : 0;
         }
         
         // 5. 完成后增加计数器
         atomic_add_release_global(atomic_finish_counter_per_expert + dst_expert_idx, 1);
     }
 ```
-与此同时，第一个sm的最后一个warp负责清理缓冲区，其他sm上的最后一个warp内在统计当前已经发送完的数据：
+与此同时，第一个sm的最后一个warp负责清理缓冲区，其他sm上的最后一个warp内在统计当前已经发送完的数据，
 ```cpp
-if (sm_id == 0) {
-    // 1. 清理下一次迭代要用的缓冲区（行 289-290）
-    for (int i = lane_id; i < num_next_clean_int; i += 32)
-        next_clean[i] = 0;
-    
-    // 2. 初始化所有专家的完成计数器（行 294-296）
-    for (int i = lane_id; i < num_experts; i += 32)
-        atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG);
-}
+} else if (warp_id == num_warps - 1) {
+        EP_DEVICE_ASSERT(num_sms > 1);
+        if (sm_id == 0) {
+            // The first SM is also responsible for checking QPs
+            EP_DEVICE_ASSERT(ibgda_get_state()->num_rc_per_pe >= num_local_experts);
 
-// 每个 SM 负责统计一部分专家（expert_begin_idx 到 expert_end_idx）
-int expert_count[kNumMaxWarpGroups] = {0};
-const auto expert_begin_idx = sm_id * num_warp_groups;
-const auto expert_end_idx = min(expert_begin_idx + num_warp_groups, num_experts);
+            // The first SM is also responsible for cleaning the next buffer
+            #pragma unroll
+            for (int i = lane_id; i < num_next_clean_int; i += 32)
+                next_clean[i] = 0;
 
-// 遍历所有 topk_idx，统计属于本 SM 负责专家的 token 数量
-for (int i = lane_id; i < num_tokens * num_topk; i += 32) {
-    auto idx = static_cast<int>(__ldg(topk_idx + i));
-    if (idx >= expert_begin_idx and idx < expert_end_idx)
-        expert_count[idx - expert_begin_idx]++;
-}
+            // Notify before executing `int_p`
+            __syncwarp();
+            #pragma unroll
+            for (int i = lane_id; i < num_experts; i += 32) {
+                // lane_id == 0 and sm_id == 0 ? printf("code run into last warp_id\n") : 0; 会走
+                atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG);
+            }
+        }
 
-// Warp reduce 汇总并更新全局计数器
-for (int i = expert_begin_idx; i < expert_end_idx; ++i) {
-    auto sum = warp_reduce_sum(expert_count[i - expert_begin_idx]);
-    if (lane_id == 0) {
-        // 一个sm上一个share mem来存当前发的token数量
-        shared_num_tokens_sent_per_expert[i - expert_begin_idx] = sum;
-        // counter初始化的时候是FINISHED_SUM_TAG，这里for循环发完就是sum，所以后面的代码在用while轮询这里不同responsible_expert_idx的FINISHED_SUM_TAG + sum + FINISHED_SUM_TAG - sum是不是已经等于FINISHED_SUM_TAG * 2了
-        atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG - sum);
+        // This SM should be responsible for some destination experts, read `topk_idx` for them
+        int expert_count[kNumMaxWarpGroups] = {0};
+        const auto expert_begin_idx = sm_id * num_warp_groups;
+        const auto expert_end_idx = min(expert_begin_idx + num_warp_groups, num_experts);
+
+        // Per lane count
+        #pragma unroll 8
+        for (int i = lane_id; i < num_tokens * num_topk; i += 32) {
+            auto idx = static_cast<int>(__ldg(topk_idx + i));
+            if (idx >= expert_begin_idx and idx < expert_end_idx)
+                expert_count[idx - expert_begin_idx]++;
+        }
+
+        // Warp reduce
+        #pragma unroll
+        for (int i = expert_begin_idx; i < expert_end_idx; ++i) {
+            auto sum = warp_reduce_sum(expert_count[i - expert_begin_idx]);
+            if (lane_id == 0) {
+                shared_num_tokens_sent_per_expert[i - expert_begin_idx] = sum;
+                atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG - sum);
+            }
+        }
     }
-}
 ```
 在数据完成发送后，每个warp group的sub warp 0还要用一次ibgda，因为要告诉对端我现在数据发完了。
 ```cpp
-auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_count + dst_expert_local_idx * num_ranks + rank);
-auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
-auto num_tokens_sent = shared_num_tokens_sent_per_expert[responsible_expert_idx - sm_id * num_warp_groups];
-while (ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) != FINISHED_SUM_TAG * 2)
-	;
-if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
-    if (dst_p2p_ptr == 0) {
-        // RDMA 原子操作
-        nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), -num_tokens_sent - 1, dst_rank, dst_expert_local_idx);
-    } else {
-        // P2P 本地写
-        st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -num_tokens_sent - 1);
+if (responsible_expert_idx < num_experts and sub_warp_id == 0 and lane_id == 0) {
+        const auto dst_rank = responsible_expert_idx / num_local_experts;
+        const auto dst_expert_local_idx = responsible_expert_idx % num_local_experts;
+        const auto num_tokens_sent = shared_num_tokens_sent_per_expert[responsible_expert_idx - sm_id * num_warp_groups];
+
+        // Wait local sends issued and send expert counts
+        while (ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) != FINISHED_SUM_TAG * 2)
+            ;
+        auto dst_ptr = reinterpret_cast<uint64_t>(rdma_recv_count + dst_expert_local_idx * num_ranks + rank);
+        auto dst_p2p_ptr = nvshmemi_get_p2p_ptr(dst_ptr, rank, dst_rank);
+        if (not is_rank_masked(mask_buffer_ptr, dst_rank)) {
+            if (dst_p2p_ptr == 0) {
+                sm_id == 0 ? printf("[3]sm_id0 run into amo ope\n") : 0;
+                nvshmemi_ibgda_amo_nonfetch_add(reinterpret_cast<int*>(dst_ptr), -num_tokens_sent - 1, dst_rank, dst_expert_local_idx);
+            } else {
+                st_release_sys_global(reinterpret_cast<int*>(dst_p2p_ptr), -num_tokens_sent - 1);
+                sm_id == 0 ? printf("[4]sm_id0 not run into amo ope\n") : 0;
+            }
+        }
+
+        // Clean workspace for next use
+        atomic_counter_per_expert[responsible_expert_idx] = 0;
+        atomic_finish_counter_per_expert[responsible_expert_idx] = 0;
+
+        // Clean `packed_recv_count`
+        if (dst_rank == 0)
+            packed_recv_count[dst_expert_local_idx] = 0;
     }
-}
 ```
 这里发送的是 -num_tokens_sent - 1 ，接收端的 rdma_recv_count 初始化为 0，会在读取时把这个数字转为正数。
 ### 1.3 接收流程
@@ -209,6 +236,18 @@ calculate_fp8_scales(amax, scale, scale_inv, round_scale);
 // 转换为 FP8 E4M3
 float2 fp32x2 = {fp32_values[j] * scale, fp32_values[j + 1] * scale};
 fp8x2_values[j / 2] = __nv_cvt_float2_to_fp8x2(fp32x2, __NV_SATFINITE, __NV_E4M3);
+```
+### 1.5 补充
+#### **关于dispatch的grid dim && block dim**
+在launch.cuh内可以看到`cudaLaunchConfig_t cfg = {(num_sms), (num_threads), 0, stream, nullptr, 0};`定义。在dispatch的host侧函数计算这两个值:
+```cpp
+// 计算grid和block的数量的公式如下：
+const int num_warp_groups = ceil_div(num_experts, num_device_sms);
+const int num_warps_per_group = 32 / num_warp_groups;
+const auto num_warps = num_warp_groups * num_warps_per_group;
+const auto num_sms = ceil_div(num_experts, num_warp_groups);
+
+SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
 ```
 
 ## 

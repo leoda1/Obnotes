@@ -132,18 +132,31 @@ export PYTHONPATH=/workspace/liuda/fault/DeepEP:$PYTHONPATH
 # node201
 export MPI_HOME=/usr/local/mpi
 export CUDA_HOME=/usr/local/cuda
+export PYTHONPATH=/workspace/liuda/fault/DeepEP:$PYTHONPATH
 export NVSHMEM_HOME=/workspace/liuda/output/nvshmem
 export LD_LIBRARY_PATH="${NVSHMEM_HOME}/lib:$CUDA_HOME/lib64:$MPI_HOME/lib:$LD_LIBRARY_PATH"
-export NVSHMEM_DEBUG=INFO
+export NVSHMEM_IBGDA_ENABLE_FAULT_TOLERANCE=1
+export NVSHMEM_IBGDA_ENABLE_MULTI_PORT=1
+export CUDA_LAUNCH_BLOCKING=1
 MASTER_ADDR=10.1.3.201 MASTER_PORT=29501 WORLD_SIZE=2 RANK=0 \
-python /workspace/liuda/fault/DeepEP/tests/test_internode.py  2>&1 | tee /workspace/liuda/fault/DeepEP/internode_test_node1.log
+python /workspace/liuda/fault/DeepEP/tests/test_low_latency.py --skip-combine --pressure-test 2>&1 | tee /workspace/liuda/fault/DeepEP/internode_test_node1.log
+# python /workspace/liuda/fault/DeepEP/tests/test_internode.py --skip-combine 2>&1 | tee /workspace/liuda/fault/DeepEP/internode_test_node1.log
+# export NVSHMEM_DEBUG=INFO
+
 # node023
 export MPI_HOME=/usr/local/mpi
 export CUDA_HOME=/usr/local/cuda
+export PYTHONPATH=/workspace/liuda/fault/DeepEP:$PYTHONPATH
 export NVSHMEM_HOME=/workspace/liuda/output/nvshmem
 export LD_LIBRARY_PATH="${NVSHMEM_HOME}/lib:$CUDA_HOME/lib64:$MPI_HOME/lib:$LD_LIBRARY_PATH"
+export NVSHMEM_IBGDA_ENABLE_FAULT_TOLERANCE=1
+export NVSHMEM_IBGDA_ENABLE_MULTI_PORT=1
+export CUDA_LAUNCH_BLOCKING=1
 MASTER_ADDR=10.1.3.201 MASTER_PORT=29501 WORLD_SIZE=2 RANK=1 \
-python /workspace/liuda/fault/DeepEP/tests/test_internode.py   2>&1 | tee /workspace/liuda/fault/DeepEP/internode_test_node2.log
+python /workspace/liuda/fault/DeepEP/tests/test_low_latency.py --skip-combine --pressure-test 2>&1 | tee /workspace/liuda/fault/DeepEP/internode_test_node2.log
+# python /workspace/liuda/fault/DeepEP/tests/test_internode.py --skip-combine 2>&1 | tee /workspace/liuda/fault/DeepEP/internode_test_node2.log
+# export NVSHMEM_DEBUG=INFO
+
 ```
 # 1 Related
 a. 在DeepEP的[[internode_ll.cu]]内包含了dispatch和combine，二者内使用了nvshmemi_ibgda_put_nbi_warp来通信，以及nvshmemi_ibgda_amo_nonfetch_add给remote进程加原子计数的原理。
@@ -393,8 +406,13 @@ graph TB
 ```
 ![[Support DeepEP Fault Tolerance 2025-11-10 21.03.35.excalidraw  | 100%]]
 # 4. uni-test
+### down口
 测试的时候通过网卡或者交换机down口，所有操作见[[How to Down RNIC Port]]。
-
+### 查看网卡流量
+用mlnx_perf + ibstat看到的对应网卡名字
+```shell
+mlnx_perf -i enp41s0np0
+```
 # 5. question
 ### 5.1 per-PE初始化的话 pe0怎么去给pe1的nic设备初始化？
 在nvshmem内正常情况是每个pe一个nic，所以不能跨进程去db另一个nic。在环境变量内有IBGDA_ENABLE_MULTI_PORT，可以让 `num_selected_devs`的值不会被hardcode成1，所以就可以doorbell多个NIC。具体原因是：
@@ -590,6 +608,11 @@ rc=3 → dst_pe=0（同 PE，直接 continue）
 
 打印看到：
 ![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251208153427330.png)
+#### 主/备 卡流量测试
+在gpu0上测试internode_ll可以看到原来网卡流量如下:
+![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251218180730828.png)
+备份网卡流量如下：
+![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251218180542696.png)
 
 ### 5.3 备份QP在另一个NIC上，主设备的MR不能直接用于备份QP，所以怎么去给备份设备的PD上注册自己MR？以及lkey和rkey的部分应该怎么设计？
 在 `ibgda_mem_handle` 内增加对应的备份MR的需要的字段如下：
@@ -700,7 +723,7 @@ __device__ static __forceinline__ nvshmemi_ibgda_device_qp_t* ibgda_get_backup_r
 }
 ```
 很快就发现，我的back up的QP创建(init阶段)打印了QPN，GID，lkey，rkey都对，但是backup_rcs里面选择出来的QP打印的却是主NIC上的QPN，是这个导致的hang吗？
-找了一圈，发现不同NIC上确实可能出现相同QPN，但是只要GID不同就没事。那么问题就是别的，核对了一遍发现问题出在`ibgda_get_device_qp`的时候传的backup_device是(struct ibgda_device * )ibgda_state->devices后面的偏移。而我算错了偏移量 `backup_dev_entry`，现在backup_dev_entry = ibgda_state->backup_dev_ids[dev_idx];（我提前准备好的backup_dev_ids），输入当前的dev_idx就可以找到正确的backup device丢到ibgda_get_device_qp后，于是问题解决了。
+找了一圈，发现不同NIC上确实可能出现相同QPN，但是只要GID不同就没事。那么问题就是别的，核对了一遍发现问题出在nvshmem内`ibgda_get_device_qp`的时候传的backup_device是(struct ibgda_device * )ibgda_state->devices后面的偏移。而我算错了偏移量 `backup_dev_entry`，现在backup_dev_entry = ibgda_state->backup_dev_ids[dev_idx];（我提前准备好的backup_dev_ids），输入当前的dev_idx就可以找到正确的backup device丢到ibgda_get_device_qp后，于是问题解决了。
 > [!注意]
 > 因为我备份设备的QP是在 device->rc.backup_eps[i]上，我的想法就是主网卡的数据结构里面存好我准备好的bakcup网卡的数据结构，出问题了往后偏移就可以拿到我用什么备份的rc去发数据了，备份设备也是如此，直接在ibgda_state->devices上往后偏移。
 ```cpp
@@ -722,10 +745,77 @@ for (int j = 0; j < n_devs_selected; j++) {
 ```
 ### 5.5 怎么设计一个高效的cq检查
 在只使用primary QP / backup QP都能完成deepep的internode ibgda后，写了第一版本出故障后切到backup QP发送数据的逻辑。就是直接看当前这次QP的wqe是否前进了，超时拿不到cq就直接用backup的rc重新准备wqe再下wr和amo操作。然后就hang了。。。
-初步怀疑：
-a. 
+a. 排查了一大段时间，发现是submit wr的时候之前没注意到low_latency的话准备好4个wqe才doorbell一次。在调用 `nvshmemi_ibgda_put_nbi_warp` 如果没给模版参数传kAlwaysDoPostSend就会导致这个问题，传递true给kAlwaysDoPostSend后往前走了一步。
+```cpp
+template <bool kAlwaysDoPostSend>
+__device__ static __forceinline__ void ibgda_submit_requests(...) {
+    // Wait for prior WQE slots to be filled first
+    while (atomicCAS(ready_idx, base_wqe_idx, new_wqe_idx) != base_wqe_idx)
+        ;
+    // Always post, not in batch
+    if (!state->use_async_postsend) {
+        constexpr int kNumRequestInBatch = 4;
+        if (kAlwaysDoPostSend or (message_idx + 1) % kNumRequestInBatch == 0)
+            ibgda_post_send(qp, new_wqe_idx);
+    }
+}
+```
 
-在deepep的ibgda_device.cuh内，定义了一个 `nvshmemi_ibgda_quiet` 函数，让一些线程去检查primary NIC的cq完成状态。当我们主的down了之后，首先就需要它能够stop to check primary NIC cq status。so：
+b. 在随机某个时刻随机down某个nic的时候(这是一个n方的复杂度了 干)，发现有时候会切到备份，有时候切不到。在经过减少process，去掉combine，在dispatch的thread/warp/sm/kernel/process各种力度打印日志，最后观察到如果随机down网卡deepep会hang在以下两种情况：
+
+**case1:** down了之后dispatch的收端的在`while ((num_recv_tokens == 0))`，持续无法退出。所以说明发端没有正确完成rdma_recv_count的amo更新。
+* 刚down的时刻，backup nic没看见流量，说明切的时刻虽然切了backup QP，但是有东西计算错了。（假设最开始主的nic在跑，down备份nic不会影响主的nic）
+* 如果恢复刚刚down的口就会恢复dispatch功能，此时会看到主/备上都有流量，说明外面的某个地方强依赖主nic的传输(主的nic在跑，此时down主/备份nic都会hang住)。
+* 假如上来就走backup nic时，数据能正常发送，但是primary nic上也会有极其轻微的流量。
+
+
+
+
+**case2:** 突然down的时候sender能正确用dev_idx=1这个备份nic下QP，nvshmemi_ibgda_amo_nonfetch_add也退出了（<mark style="background: #FF5582A6;">需要再去确定sender走到了哪里</mark>）。receiver侧kernel也正常退出了。这个hang完全不会打印，所以现在需要加nsys抓一下看看hang在哪里。
+```cpp
+DEADLOCK_HYP_F: dispatch recv entry: src_rank=1, local_expert_idx=0, masked=0
+Debug: Waiting for tokens from src_rank 1
+Debug: Waiting for tokens from src_rank 0
+DEADLOCK_HYP_J: dispatch checking send phase: phases=2, has_send=0
+DEADLOCK_HYP_P: dispatch recv before bar.sync: warp_group_id=0, num_recv_tokens=6
+DEADLOCK_HYP_P: dispatch recv after bar.sync: warp_group_id=0
+DEADLOCK_HYP_Q: dispatch recv before copy loop: num_recv_tokens=6
+DEADLOCK_HYP_R: dispatch kernel exit: responsible_expert_idx=0
+DEADLOCK_HYP_H: dispatch kernel entry: phases=1, num_sms=2, num_tokens=8
+DEADLOCK_HYP_J: dispatch checking send phase: phases=1, has_send=1
+DEADLOCK_HYP_E: dispatch send before put_nbi: token_idx=0, dst_rank=0, dst_expert_idx=0, masked=0
+DEADLOCK_HYP_E: dispatch send before put_nbi: token_idx=0, dst_rank=1, dst_expert_idx=1, masked=0
+DEADLOCK_HYP_E: dispatch send calling put_nbi_warp: dst_rank=1
+DEADLOCK_HYP_E: dispatch send after put_nbi_warp: dst_rank=1
+DEADLOCK_HYP_E: dispatch send before put_nbi: token_idx=2, dst_rank=1, dst_expert_idx=1, masked=0
+DEADLOCK_HYP_E: dispatch send before put_nbi: token_idx=2, dst_rank=0, dst_expert_idx=0, masked=0
+DEADLOCK_HYP_E: dispatch send calling put_nbi_warp: dst_rank=1
+DEADLOCK_HYP_E: dispatch send after put_nbi_warp: dst_rank=1
+DEADLOCK_HYP_E: dispatch send before put_nbi: token_idx=4, dst_rank=1, dst_expert_idx=1, masked=0
+DEADLOCK_HYP_E: dispatch send before put_nbi: token_idx=4, dst_rank=0, dst_expert_idx=0, masked=0
+DEADLOCK_HYP_E: dispatch send calling put_nbi_warp: dst_rank=1
+DEADLOCK_HYP_E: dispatch send after put_nbi_warp: dst_rank=1
+DEADLOCK_HYP_K: dispatch before __syncthreads after send phase
+DEADLOCK_HYP_E: dispatch send before put_nbi: token_idx=6, dst_rank=0, dst_expert_idx=0, masked=0
+DEADLOCK_HYP_S: dispatch nvshmemi_ibgda_amo_nonfetch_add exit, current use dev_idx=1 QP
+DEADLOCK_HYP_K: dispatch after __syncthreads after send phase
+DEADLOCK_HYP_H: dispatch kernel entry: phases=2, num_sms=2, num_tokens=8
+DEADLOCK_HYP_F: dispatch recv entry: src_rank=0, local_expert_idx=0, masked=0
+DEADLOCK_HYP_F: dispatch recv entry: src_rank=1, local_expert_idx=0, masked=0
+Debug: Waiting for tokens from src_rank 1
+Debug: Waiting for tokens from src_rank 0
+DEADLOCK_HYP_J: dispatch checking send phase: phases=2, has_send=0
+DEADLOCK_HYP_P: dispatch recv before bar.sync: warp_group_id=0, num_recv_tokens=6
+DEADLOCK_HYP_P: dispatch recv after bar.sync: warp_group_id=0
+DEADLOCK_HYP_Q: dispatch recv before copy loop: num_recv_tokens=6
+DEADLOCK_HYP_R: dispatch kernel exit: responsible_expert_idx=0
+```
+
+
+
+
+在deepep的ibgda_device.cuh内，定义了一个 `nvshmemi_ibgda_quiet` 函数，让一些线程去检查primary NIC的cq完成状态。
+当我们主的down了之后，首先就需要它能够stop to check primary NIC cq status。so：
 1. 超时宣告该QP已经fail，后续走backup。
 2. 允许上层绕过primary未完成的历史债务。
 
@@ -747,3 +837,4 @@ a.
 - [x] 修复backup rc退出destory的coredump✅ 2025-12-09
 - [x] 修复物理down口时 重新计算backup rc的时候 索引到backup QP但是使用的是primary NIC的QPN✅ 2025-12-10
 - [ ] 修复物理down口时 现在的nvshmemi_ibgda_check_cq为什么会在low_latency和normal下表现出超时/没问题 但是切换都不对的问题
+- [ ] 变更为receiver看哪个口失败 然后拿到backupqp id整个dispatch完全重发
