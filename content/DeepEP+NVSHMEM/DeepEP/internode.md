@@ -1,5 +1,5 @@
-## 0 
-在megatron的moe使能deepep后，可以看到deepep主要的四次kernel。
+## 0 profile
+在megatron的moe使能deepep后，可以看到deepep主要的四次kernel（在internode.cu内）。
 ![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251105135518984.png )
 具体使用的线程数量如下：
 
@@ -10,7 +10,7 @@
 | intranode::cached_notify_combine  | <<<11, 128>>>       |
 | intranode::combine                | <<<20, 768>>>       |
 
-## 1. dispatch
+## 1. dispatch (internode_ll.cu)
 dispatch kernel 负责MoE的输入tokens根据top-k路由结果分发到不同expert ranks，**并接收来自其他ranks发过来的tokens**。
 ```cpp
 template <bool kUseFP8, bool kUseUE8M0, int kHidden>
@@ -51,14 +51,16 @@ const auto responsible_expert_idx = sm_id * num_warp_groups + warp_group_id;
 ### 1.2 发送流程
 假设现在就是intranode::dispatch<<<20, 768, null, null>>>的case。在发送前还需要提前算好很多索引才能让所有的线程按照warp划分后来执行。
 
-| 变量                         | 含义                        | 计算方式                                       | 范围  |
-| -------------------------- | ------------------------- | ------------------------------------------ | --- |
-| sm_id                      | 当前block的index             | blockIdx.x                                 | 20  |
-| warp_id                    | 一个block内warp的index        | threadIdx.x / 32                           | 24  |
-| lane_id                    | warp内thread的index         | threadIdx.x % 32                           | 32  |
-| warp_group_id              | warp所在的group的index        | warp_id / num_warps_per_group              | ～=8 |
-| sub_warp_id                | warp在一个warp group内的index  | warp_id % num_warps_per_group              | ～=3 |
-| responsible_exp<br>ert_idx | warp group负责的expert的index | sm_id * num_warp_groups<br>+ warp_group_id |     |
+| 变量                         | 含义                        | 计算方式                                                 | 范围   |
+| -------------------------- | ------------------------- | ---------------------------------------------------- | ---- |
+| sm_id                      | 当前block的index             | blockIdx.x                                           | 20   |
+| warp_id                    | 一个block内warp的index        | threadIdx.x / 32                                     | 24   |
+| lane_id                    | warp内thread的index         | threadIdx.x % 32                                     | 32   |
+| warp_group_id              | warp所在的group的index        | warp_id / num_warps_per_group                        | ～=8  |
+| sub_warp_id                | warp在一个warp group内的index  | warp_id % num_warps_per_group                        | ～=3  |
+| responsible_exp<br>ert_idx | warp group负责的expert的index | sm_id * num_warp_groups<br>+ warp_group_id           | 小于32 |
+| expert_begin_idx           | 每个sm开始负责的expert索引         | sm_id * num_warp_groups;<br>                         |      |
+| expert_end_idx             | 每个sm结束负责的expert索引         | min(expert_begin_idx + num_warp_groups, num_experts) |      |
 在前num_warps - 1个warp计算完后会调用nvshmem封装的ibgda的传输数据的接口，见[[DeepEP+NVSHMEM/DeepEP/ibgda_device.cuh]] 内的说明。传输前准备了几个参数：
 * `dst_expert_idx`：在不同warp执行代码的时候会去读该 token 的第 `warp_id` 个 topk 值，作为 `dst_expert_idx`
 * `slots_idx`: 每个warp的第一个线程计算`atomic_counter_per_expert + dst_expert_idx`然后`_shfl_sync`来广播给warp内其他31个线程。slots idx就是本次发送消息给专家x的某个槽
@@ -249,5 +251,154 @@ const auto num_sms = ceil_div(num_experts, num_warp_groups);
 
 SETUP_LAUNCH_CONFIG(num_sms, num_warps * 32, stream);
 ```
+#### 原子操作（dispatch）实现多线程正确读写的细节
+dispatch内包括`atomicAdd`、 `atomic_add_release_global`、`nvshmemi_ibgda_amo_nonfetch_add`、`ld_acquire_sys_global`和`atomicExch`。
+a. atomicAdd
+在发端/收端都可能存在多个线程给一个expert传数据，防止覆盖。例如，收端分配接收的slot用：
+```cpp
+recv_token_begin_idx = atomicAdd(packed_recv_count + local_expert_idx, num_recv_tokens);
+```
+就可以在数组packed_recv_count[local_expert_idx]原子加上num_recv_tokens，准确的为接收到的token分配连续的slots。
+
+b. atomic_add_release_global和ld_acquire_global
+atomic_add_release_global定义：这个是ptx的`atom.add.release.gpu.global` 指令，对gpu的全局内存的ptr地址原子的加上value，这次写操作之前的所有内存操作对acquire可见。
+ld_acquire_global定义：读取之前 release 操作写入的值，与release配对形成同步点。
+```cpp
+__device__ __forceinline__ int atomic_add_release_global(const int* ptr, int value) {
+    int ret;
+    asm volatile("atom.add.release.gpu.global.s32 %0, [%1], %2;" : "=r"(ret) : "l"(ptr), "r"(value));
+    return ret;
+}
+
+__device__ __forceinline__ int ld_acquire_global(const int* ptr) {
+    int ret;
+    asm volatile("ld.acquire.gpu.global.s32 %0, [%1];" : "=r"(ret) : "l"(ptr));
+    return ret;
+}
+```
+
+<mark style="background: #FF5582A6;">调用点1:</mark>（在nvshmemi_ibgda_put_nbi_warp之后）
+这里的粒度是block级别的，所以是记录的token粒度。一个token完成了wr的准备和doorbell后，这里就会在atomic_finish_counter_per_expert[expert]位置原子加1。
+```cpp
+lane_id == 0 ? atomic_add_release_global(atomc_finish_counter_per_expert + dst_expert_idx, 1) : 0;
+```
+<mark style="background: #FF5582A6;">调用点2：</mark>（最后一个warp初始化的时候）
+给数组atomic_finish_counter_per_expert[i]的每个expert初始化为FINISHED_SUM_TAG(这个宏是1024)。
+```cpp
+#pragma unroll
+for (int i = lane_id; i < num_experts; i += 32)
+    atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG);
+```
+<mark style="background: #FF5582A6;">调用电3:</mark>（最后一个warp统计时候）
+计算出预期的sum后对每个数组atomic_finish_counter_per_expert[i]的expert原子加上FINISHED_SUM_TAG - sum。
+```cpp
+#pragma unroll
+for (int i = expert_begin_idx; i < expert_end_idx; ++i) {
+    auto sum = warp_reduce_sum(expert_count[i - expert_begin_idx]);
+    if (lane_id == 0) {
+        shared_num_tokens_sent_per_expert[i - expert_begin_idx] = sum;
+        atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG - sum);
+    }
+}
+```
+总的来看，调用点顺序为2->1->3。具体流程如下：
+1. 每个专家的atomic_finish_counter_per_expert初始原子token数初始化为FINISHED_SUM_TAG(1024)。(所有sm的warp都可以访问)
+2. warp_id < num_warps - 1：每完成一次nvshmemi_ibgda_put_nbi_warp就会在数组atomic_finish_counter_per_expert对应的专家位置+1。(注：moe的每个token需要发给topk个专家，这里传进dispatch的topk_idx是一维数组，里面总数就是token总数乘以topk，存好了token[i]发送给哪个expert。发送阶段每个sm内的warp_id在这个数组上去找自己token发给哪个专家，如下：
+    `dst_expert_idx = warp_id < num_topk ? __ldg(topk_idx + token_idx * num_topk + warp_id)) : -1`
+3. 每个 SM 的最后一个 warp 的 lane 0 : 在统计的时刻，单个sm内，用shared memory数组存了该sm负责的某些专家的token的总数。atomic_finish_counter_per_expert数组的专家i位置再加上 FINISHED_SUM_TAG - sum (注：**这个sum是不是真实的**，是提前计算出来要收到的数量。第二步里面的topk_idx总长是num_tokens * num_topk，所以deepep去for loop了整个一位数组，算出来每个对应的专家要收几个tokens
+    ```cpp
+    #pragma unroll 8
+        for (int i = lane_id; i < num_tokens * num_topk; i += 32) {
+            auto idx = static_cast<int>(__ldg(topk_idx + i));
+            if (idx >= expert_begin_idx and idx < expert_end_idx)
+                expert_count[idx - expert_begin_idx]++;
+        }
+    // Warp reduce
+    #pragma unroll
+    for (int i = expert_begin_idx; i < expert_end_idx; ++i) {
+        auto sum = warp_reduce_sum(expert_count[i - expert_begin_idx]);
+        if (lane_id == 0) {
+            shared_num_tokens_sent_per_expert[i - expert_begin_idx] = sum;
+            atomic_add_release_global(atomic_finish_counter_per_expert + i, FINISHED_SUM_TAG - sum);
+        }
+    }
+    ```
+    接着对这个warp内的32个lane线程reduce求和拿到当前这个sm对目标专家i预期要发送的token数量（就是这个sum，需要记住这是预先计算出来的，不是真实传输的）。
+4. 接着一直死轮询对应的专家的原子数有没有变成FINISHED_SUM_TAG * 2，因为当nvshmemi_ibgda_put_nbi_warp对目标专家完成一次token的put操作就会+1，在 syncthreads(); 之后专家i要收到的token就是步骤三里面算的sum个，正好抵消。FINISHED_SUM_TAG + sum + (FINISHED_SUM_TAG - sum)；（其实就是实际下的wr和预期要收的wr数量一致）
+```cpp
+// 
+while (ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) != FINISHED_SUM_TAG * 2)
+    ;
+```
+5. 当上面while完成就会去下amo，此时又用了第三步的shared_num_tokens_sent_per_expert(sm上的shared_memory)，之前是每个sm的最后一个warp来往这个里面写入发给某个专家的token总数，现在每个sm内其他0到n-2个warp来共享内存读取这个值。这个value会变成wqe发给对端。
+
+
+c. ld_acquire_sys_global
+ 定义：读之前release写入到sys.global内的值，这是系统级别全局内存可见(跨GPU和跨节点)。
+```cpp
+__device__ __forceinline__ uint64_t ld_acquire_sys_global(const uint64_t* ptr) {
+    uint64_t ret;
+    asm volatile("ld.acquire.sys.global.u64 %0, [%1];" : "=l"(ret) : "l"(ptr));
+    return ret;
+}
+```
+在dispatch的receiver会去调用 ld_acquire_sys_global检查地址 `rdma_recv_count + local_expert_idx * num_ranks + src_rank` 的value有没有变。为什么这里的`rdma_recv_count` 可以跨GPU/节点访问? 因为这是一个nvshmem_align（NVSHMEM的对称内存分配）的，由上层deep_ep_cpp.Buffer()实例化的时候自己的初始化内会去调用 `nvshmem_align(alignment, size)` 。
+这个偏移下两个跨机的rank内：
+```cpp
+Rank 0 的视角:
+  rdma_recv_count[0 * num_ranks + 0] = 从 rank 0 发送到 expert 0 的 count（本地）
+  rdma_recv_count[0 * num_ranks + 1] = 从 rank 1 发送到 expert 0 的 count（远程）
+  rdma_recv_count[0 * num_ranks + 2] = 从 rank 2 发送到 expert 0 的 count（远程）
+
+Rank 1 的视角（相同的虚拟地址）:
+  rdma_recv_count[0 * num_ranks + 0] = 从 rank 0 发送到 expert 0 的 count（远程）
+  rdma_recv_count[0 * num_ranks + 1] = 从 rank 1 发送到 expert 0 的 count（本地）
+  rdma_recv_count[0 * num_ranks + 2] = 从 rank 2 发送到 expert 0 的 count（远程）
+```
+
+**额外知识：**
+python绑定c++：
+```cpp
+// deep_ep.hpp
+namespace deep_ep {
+    struct Buffer { ... };
+    struct Config { ... };
+    struct EventHandle { ... };
+}
+
+// deep_ep.cpp
+namespace deep_ep {
+    // Buffer 的实现
+    void Buffer::sync(...) {
+        ...
+        nvshmem_align(alignment, size);
+    }
+}
+
+// pybind11 绑定
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    pybind11::class_<deep_ep::Buffer>(m, "Buffer")  // 使用完全限定名
+        .def(pybind11::init<...>())
+        .def("sync", &deep_ep::Buffer::sync);
+}
+```
+然后对python的Buffer类初始化init内调用这个前面绑定的c++的sync：
+```python
+class Buffer:
+    def __init__(self,
+                 group: Optional[dist.ProcessGroup],
+                 num_nvl_bytes: int = 0,
+                 num_rdma_bytes: int = 0,
+                 low_latency_mode: bool = False,
+                 ...
+                 comm: Optional["mpi4py.MPI.Comm"] = None) -> None:
+        ...
+        self.runtime.sync(device_ids, ipc_handles, root_unique_id)
+```
+
+
+
+
+最后用ld_acquire_global去访问这个原子有没有变成2048来判断
 
 ## 

@@ -117,12 +117,13 @@ export NVSHMEM_DIR=/workspace/liuda/output/nvshmem
 export LD_LIBRARY_PATH="${NVSHMEM_DIR}/lib:$LD_LIBRARY_PATH"
 export PATH="${NVSHMEM_DIR}/bin:$PATH"
 export TORCH_CUDA_ARCH_LIST="9.0"
+rm -rf build/
 cd /workspace/liuda/fault/DeepEP
 rm deep_ep_cpp.cpython-312-x86*
 NVSHMEM_DIR=/workspace/liuda/output/nvshmem  python3 setup.py build
 ln -sf build/lib.linux-x86_64-cpython-312/deep_ep_cpp.cpython-312-x86_64-linux-gnu.so deep_ep_cpp.cpython-312-x86_64-linux-gnu.so
 ```
-然后在测试脚本前面加上
+然后在测试脚本前面加上下面的python路径即可：
 ```shell
 export PYTHONPATH=/workspace/liuda/fault/DeepEP:$PYTHONPATH
 ```
@@ -137,10 +138,12 @@ export NVSHMEM_HOME=/workspace/liuda/output/nvshmem
 export LD_LIBRARY_PATH="${NVSHMEM_HOME}/lib:$CUDA_HOME/lib64:$MPI_HOME/lib:$LD_LIBRARY_PATH"
 export NVSHMEM_IBGDA_ENABLE_FAULT_TOLERANCE=1
 export NVSHMEM_IBGDA_ENABLE_MULTI_PORT=1
-export CUDA_LAUNCH_BLOCKING=1
 MASTER_ADDR=10.1.3.201 MASTER_PORT=29501 WORLD_SIZE=2 RANK=0 \
 python /workspace/liuda/fault/DeepEP/tests/test_low_latency.py --skip-combine --pressure-test 2>&1 | tee /workspace/liuda/fault/DeepEP/internode_test_node1.log
+# nsys profile -t cuda,nvtx -o test_run1 --duration 60 python /workspace/liuda/fault/DeepEP/tests/test_low_latency.py --skip-combine --pressure-test  2>&1 | tee /workspace/liuda/fault/DeepEP/internode_test_node1.log
 # python /workspace/liuda/fault/DeepEP/tests/test_internode.py --skip-combine 2>&1 | tee /workspace/liuda/fault/DeepEP/internode_test_node1.log
+# export CUDA_LAUNCH_BLOCKING=1
+# export CUDA_VISIBLE_DEVICES=7
 # export NVSHMEM_DEBUG=INFO
 
 # node023
@@ -151,15 +154,17 @@ export NVSHMEM_HOME=/workspace/liuda/output/nvshmem
 export LD_LIBRARY_PATH="${NVSHMEM_HOME}/lib:$CUDA_HOME/lib64:$MPI_HOME/lib:$LD_LIBRARY_PATH"
 export NVSHMEM_IBGDA_ENABLE_FAULT_TOLERANCE=1
 export NVSHMEM_IBGDA_ENABLE_MULTI_PORT=1
-export CUDA_LAUNCH_BLOCKING=1
 MASTER_ADDR=10.1.3.201 MASTER_PORT=29501 WORLD_SIZE=2 RANK=1 \
 python /workspace/liuda/fault/DeepEP/tests/test_low_latency.py --skip-combine --pressure-test 2>&1 | tee /workspace/liuda/fault/DeepEP/internode_test_node2.log
+# nsys profile -t cuda,nvtx -o test_run_amo --duration 60 python /workspace/liuda/fault/DeepEP/tests/test_low_latency.py --skip-combine --pressure-test 2>&1 | tee /workspace/liuda/fault/DeepEP/internode_test_node2.log
 # python /workspace/liuda/fault/DeepEP/tests/test_internode.py --skip-combine 2>&1 | tee /workspace/liuda/fault/DeepEP/internode_test_node2.log
+# export CUDA_LAUNCH_BLOCKING=1
+# export CUDA_VISIBLE_DEVICES=7
 # export NVSHMEM_DEBUG=INFO
 
 ```
 # 1 Related
-a. 在DeepEP的[[internode_ll.cu]]内包含了dispatch和combine，二者内使用了nvshmemi_ibgda_put_nbi_warp来通信，以及nvshmemi_ibgda_amo_nonfetch_add给remote进程加原子计数的原理。
+a. 在DeepEP的[[internode]]内包含了dispatch和combine，二者内使用了nvshmemi_ibgda_put_nbi_warp来通信，以及nvshmemi_ibgda_amo_nonfetch_add给remote进程加原子计数的原理。
 b. DeepEP的[[DeepEP+NVSHMEM/DeepEP/ibgda_device.cuh]]内具体写了nvshmemi_ibgda_put_nbi_warp和nvshmemi_ibgda_amo_nonfetch_add的接口。
 c. 具体的传输在NVSHMEM的[[ibgda.cpp]]内实现。
 # 2 Specific Plan
@@ -768,10 +773,7 @@ b. 在随机某个时刻随机down某个nic的时候(这是一个n方的复杂�
 * 如果恢复刚刚down的口就会恢复dispatch功能，此时会看到主/备上都有流量，说明外面的某个地方强依赖主nic的传输(主的nic在跑，此时down主/备份nic都会hang住)。
 * 假如上来就走backup nic时，数据能正常发送，但是primary nic上也会有极其轻微的流量。
 
-
-
-
-**case2:** 突然down的时候sender能正确用dev_idx=1这个备份nic下QP，nvshmemi_ibgda_amo_nonfetch_add也退出了（<mark style="background: #FF5582A6;">需要再去确定sender走到了哪里</mark>）。receiver侧kernel也正常退出了。这个hang完全不会打印，所以现在需要加nsys抓一下看看hang在哪里。
+**case2:** 突然down的时候sender能正确用dev_idx=1这个备份nic下QP，nvshmemi_ibgda_amo_nonfetch_add也退出了（<mark style="background: #FF5582A6;">需要再去确定sender走到了哪里</mark>）。receiver侧kernel也正常退出了。这个hang完全不会打印，所以现在需要加nsys抓一下看看hang在哪里。后来nsys发现走备份的nic的kernel都已经正确下到stream上了。
 ```cpp
 DEADLOCK_HYP_F: dispatch recv entry: src_rank=1, local_expert_idx=0, masked=0
 Debug: Waiting for tokens from src_rank 1
@@ -811,8 +813,24 @@ DEADLOCK_HYP_Q: dispatch recv before copy loop: num_recv_tokens=6
 DEADLOCK_HYP_R: dispatch kernel exit: responsible_expert_idx=0
 ```
 
+时隔3天，因为put操作的时候正常，我amo就会认为也正常，到amo的时候网卡down了就gg。在amo内也加上了检查cq，确保amo能完成写到对端再退出。同时在amo读取deep_ep_ibgda_primary_is_bad的时候__threadfence()一下。（amo是一个<mark style="background: #FF5582A6;">warp group的lane0</mark>线程执行，而deep_ep_ibgda_primary_is_bad变量是每个下put操作的<mark style="background: #FF5582A6;">warp的lane0</mark>去写）。此时以为大功告成。
 
+c. 测试了一圈后，hang在了下一个地方。排查发现我必须手动去up主nic才能完成容错，这个case分析起来就说明nvshmem内控制面某个地方还在走主nic没走备份nic。（因为nvshmem默认topo选pcie最近的nic（only one））
 
+解决方案：
+因为nccl/vccl暂时还没有兼容当前deepep的nvshmem的网卡级别容错，所以dispatch/combine用的nccl改gloo来先all_gather。例如第一次all_gather要去拿group组内的topk，走nccl的allgather的话就直接hang（cause nccl不知道nic down了）。
+```python
+# all_topk_idx = torch.empty((num_ranks, num_tokens, num_topk), dtype=topk_idx.dtype, device='cuda')
+# dist.all_gather_into_tensor(all_topk_idx, topk_idx, group=group)
+
+topk_idx_cpu = topk_idx.cpu()
+glooGp =dist.new_group(backend='gloo')
+all_topk_idx_cpu_flat = torch.empty((num_ranks * num_tokens, num_topk), dtype=topk_idx_cpu.dtype, device='cpu')
+dist.all_gather_into_tensor(all_topk_idx_cpu_flat, topk_idx_cpu, group=glooGp)
+all_topk_idx_cpu = all_topk_idx_cpu_flat.view(num_ranks, num_tokens, num_topk)
+all_topk_idx = all_topk_idx_cpu.to(device='cuda')
+```
+201/23机器 /etc/nccl.conf设置了一下这两个机器各自的GLOO_SOCKET_IFNAME
 
 在deepep的ibgda_device.cuh内，定义了一个 `nvshmemi_ibgda_quiet` 函数，让一些线程去检查primary NIC的cq完成状态。
 当我们主的down了之后，首先就需要它能够stop to check primary NIC cq status。so：
