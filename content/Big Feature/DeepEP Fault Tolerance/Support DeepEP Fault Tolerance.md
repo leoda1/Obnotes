@@ -830,7 +830,17 @@ dist.all_gather_into_tensor(all_topk_idx_cpu_flat, topk_idx_cpu, group=glooGp)
 all_topk_idx_cpu = all_topk_idx_cpu_flat.view(num_ranks, num_tokens, num_topk)
 all_topk_idx = all_topk_idx_cpu.to(device='cuda')
 ```
-201/23机器 /etc/nccl.conf设置了一下这两个机器各自的GLOO_SOCKET_IFNAME
+201/23机器 /etc/nccl.conf设置了一下这两个机器各自的GLOO_SOCKET_IFNAME，测试发现现在down口能切到备份网卡，都没问题。此时以为又大功告成了。
+
+d. 跨机4卡的时候 新的hang观察到是cpu侧launch后没有变成正常dispatch，gpu侧也调度不上。
+![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251224160636299.png)
+观察到：大于两张卡的时候我必须要手动up一下被down的网卡 才能继续 这一次cudaLaunchKernel就能正常把dispatch下给cuda去执行 。
+- [x] ~~怀疑1: gpu0跨轨发数据的时候建链有问题。测试gpu0打对端gpu1，down gpu0的nic0，可以正常切换到nic1走发数据到对端。~~
+![[Support DeepEP Fault Tolerance 2025-12-24 21.15.21.excalidraw | center]]
+- [ ] 
+
+
+
 
 在deepep的ibgda_device.cuh内，定义了一个 `nvshmemi_ibgda_quiet` 函数，让一些线程去检查primary NIC的cq完成状态。
 当我们主的down了之后，首先就需要它能够stop to check primary NIC cq status。so：
