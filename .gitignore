@@ -10,4 +10,7 @@ private/
 .replit
 replit.nix
 content/Assert
-content_backup/
+.makemd/
+.space/
+.trash/
+*.mdc
