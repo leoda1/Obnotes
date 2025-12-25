@@ -1,6 +1,6 @@
 ## 0. 布局
 在一次deepep调用dispatch后的流程大致如下：
-```md
+```txt
 === 初始化阶段 (CPU) ===
 1. nvshmem_ibgda_init()
    ├─ 加载 IB 库 (libibverbs, libmlx5)

@@ -325,7 +325,7 @@ static int ibgda_connect_device_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
 `ibgda_setup_backup_rc_endpoints` 实现参考 [[ibgda.cpp#2.2 ibgda_setup_rc_endpoints|主RC endpoints的setup函数]]的逻辑实现。
 
 #### c. GPU状态设置
-在 Phase 5（ibgda_setup_gpu_state）里，ibgda_populate_rc_gpu_data 和 ibgda_populate_backup_rc_gpu_data 会把主/备 QP 的 device 视角结构体一起发布到 nvshmemi_ibgda_device_state_t，并匹配 rc_health_status、rc_switch_time 等监控数组。运行时一旦 CQ 检测到失败，设备端就能根据这些索引迅速切到 backup RC——无需再触发 host 端 allocate。
+在 Phase 5（ibgda_setup_gpu_state）里，ibgda_populate_rc_gpu_data 和 ibgda_populate_backup_rc_gpu_data 会把主/备 QP 的 device 视角结构体一起发布到 nvshmemi_ibgda_device_state_t，并匹配 rc_`health_`status、rc_switch_time 等监控数组。运行时一旦 CQ 检测到失败，设备端就能根据这些索引迅速切到 backup RC——无需再触发 host 端 allocate。
 
 ## 2.2 Check CQ status and checkout to backup QP
 这个部分就要兼顾上层DeepEP调用 `nvshmemi_ibgda_put_nbi_warp` 和 `nvshmemi_ibgda_amo_nonfetch_add`后如何优雅的检查当前CQ状态和快速切换QP。NVSHMEM和DeepEP的内存布局不一致，具体原因见[[DeepEP+NVSHMEM/NVSHMEM/ibgda_device.cuh#2.1 ibgda_get_rc| ibgda_device.cuh]]，所以最终nvshmem又降版本到3.4.5。
@@ -424,7 +424,7 @@ mlnx_perf -i enp41s0np0
 1. uar = mlx5dv_devx_alloc_uar(context, MLX5DV_UAR_ALLOC_TYPE_NC);给每个device分配UAR(user access region)
 2. 用cudaHostRegisterIoMemory把NIC的MMIO区域注册给CUDA
 3. 然后调用 `ibgda_alloc_and_map_qp_uar` 去映射UAR到GPU
-此外就是`num_selected_devs`需要去host侧修改 `nvshmemi_setup_connections` 函数解除nvshmem的限制，见下面源码。在 `nvshmemi_setup_connections` 内，主要就是先遍历所有transport插件（比如，ibgda,ibrc,ibuc,ucx等），然后剔除了被选择为bitmap和没建立连接的transport。`tcurr->n_devices / state->npes_node` 把当前transport最大nic数 平均分给每个PE。就得到了selected_devices数组（每个数对应一个nic）。
+    此外就是`num_selected_devs`需要去host侧修改 `nvshmemi_setup_connections` 函数解除nvshmem的限制，见下面源码。在 `nvshmemi_setup_connections` 内，主要就是先遍历所有transport插件（比如，ibgda,ibrc,ibuc,ucx等），然后剔除了被选择为bitmap和没建立连接的transport。`tcurr->n_devices / state->npes_node` 把当前transport最大nic数 平均分给每个PE。就得到了selected_devices数组（每个数对应一个nic）。
 然后在默认的分支内， `nvshmemi_get_devices_by_distance` 函数去根据topo(NVLink && Pcie)，找到每个GPU最近的NIC，对应填写到selected_devices[i]内，所以后面的for (int i = 0; i < max_devices_per_pe; i++) loop内，每个gpu只会有一个最近的卡，其余情况都break了，所以就是found_devices是1。最后在把具体的selected_devices传递给具体transport的`connect_endpoints`实现。IBGDA 那边接收的 num_selected_devs 就是这里的 found_devices，随后的 Mr, QP 创建都基于这个数。connect 完还会 barrier 同步，然后调用 nvshmemi_update_device_state() 更新全局状态。
 ```cpp
 // src/host/transport/transport.cpp
@@ -455,7 +455,7 @@ int nvshmemi_setup_connections(nvshmemi_state_t *state) {
             found_devices++;
         } else {
             nvshmemi_get_devices_by_distance(selected_devices, max_devices_per_pe, tcurr);
-            for (int i = 0; i < max_devices_per_pe; i++) {
+            for (int i = 0; i < max_devices_per_pe; i++) { 
                 if (selected_devices[i] == -1) {
                     break;
                 }
@@ -535,7 +535,6 @@ int nvshmemi_get_devices_by_distance(int *device_arr, int max_dev_per_pe,
             used_devs[(*pairs_iter).dev_idx]++;
         }
     }
-    
     /* 
         loop two, load balance the NICs. 
         这里只处理前面的used_devs[current_nic]>=2的情况，就回去pe_dev_pairs再找当前GPU其他可选NIC
@@ -834,29 +833,28 @@ all_topk_idx = all_topk_idx_cpu.to(device='cuda')
 
 d. 跨机4卡的时候 新的hang观察到是cpu侧launch后没有变成正常dispatch，gpu侧也调度不上。
 ![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251224160636299.png)
-观察到：大于两张卡的时候我必须要手动up一下被down的网卡 才能继续 这一次cudaLaunchKernel就能正常把dispatch下给cuda去执行 。
-- [x] ~~怀疑1: gpu0跨轨发数据的时候建链有问题。测试gpu0打对端gpu1，down gpu0的nic0，可以正常切换到nic1走发数据到对端。~~
-![[Support DeepEP Fault Tolerance 2025-12-24 21.15.21.excalidraw | center]]
-- [ ] 
-
-
-
-
-在deepep的ibgda_device.cuh内，定义了一个 `nvshmemi_ibgda_quiet` 函数，让一些线程去检查primary NIC的cq完成状态。
-当我们主的down了之后，首先就需要它能够stop to check primary NIC cq status。so：
-1. 超时宣告该QP已经fail，后续走backup。
-2. 允许上层绕过primary未完成的历史债务。
-
-
-
+分析：大于两张卡的时候我必须要手动up一下被down的网卡 就可以恢复这一次cudaLaunchKernel，就能正常把dispatch下给cuda去执行。在launch的时候设置了config里面 `cudaLaunchAttributeCooperative`，需要多个GPU同时启动，一旦stream上有任何未完成的操作CUDA Driver就不会把新kernel提交给GPU。所以说明一定是前置的任务无法完成，加上日志后看到，此时收端的dispatch的 `rdma_recv_count` 等发端amo过来等不到，所以一直hang。
+- [x] ~~怀疑1: gpu0跨轨发数据的时候建链有问题。~~于是测试gpu0打对端gpu1，down gpu0的nic0，超时可以正常切换到nic1走发数据到对端。这里mlnx_perf看了gpu0的nic1和gpu1的nic0上都有流量 gpu0的nic0和gpu1的nic1都没有流量（也就是正确切换到红色的路径完成数据的发送）。排除跨轨交差qp有问题的嫌疑(alltoall换的qp的handle，理论上不该有问题的，幸亏这里没出问题)。
+![[Support DeepEP Fault Tolerance 2025-12-24 21.15.21.excalidraw.svg]]
+- [x] ~~怀疑2~~：gpu1没选到mlx5_0?(因为看到gpu1正常的时候现在的主QP走的就是nic1，但是不懂qp->dev_idx为什么打印的是0，离谱命名。。。nvshmem)
+```cpp
+// nvshmem内看到dev_idx打印的是selected_dev_idx，得打印selected_dev_idx[0]才是对于的网卡索引。。。。。。。。。。。。。
+dev_qp->dev_idx = selected_dev_idx;
+```
+- [ ] 怀疑：node2上日志显示都是node1的
+```txt
+[Gloo] Rank 3 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+BUG_CHECK_Q: AMO backup QP timeout: rank=3, pe=1, qp_id=0, qp->dev_idx=1
+BUG_CHECK_Q: AMO backup QP timeout: rank=2, pe=1, qp_id=0, qp->dev_idx=1
+BUG_CHECK_Q: AMO backup QP timeout: rank=2, pe=1, qp_id=0, qp->dev_idx=1
+BUG_CHECK_Q: AMO backup QP timeout: rank=3, pe=1, qp_id=0, qp->dev_idx=1
+DEADLOCK_HYP_F: dispatch recv waiting: rank=2 <---------------- src_rank=1, wait_cost=4790920801 cycles, iter=10000000
+DEADLOCK_HYP_F: dispatch recv waiting: rank=3 <---------------- src_rank=1, wait_cost=4770576948 cycles, iter=10000000
+```
 
 
 - [ ] RDMA 操作是异步的，CQE 可能还没生成，这个时候去nvshmemi_ibgda_check_cq导致超时？需要看看为啥主的QP会被判定为故障
 - [ ] 当NIC0默认坏掉的时候 GPU0会找到最优网卡是NIC1，然后就又会去把NIC0当做backup，需要增加if condition确保选择的备份至少是一个好的nic
-
-
-
-
 # log
 - [x] Fixing NVSHMEM memory issue ✅ 2025-12-03
 - [x] 修改后的DeepEP python能链接到修改后的deepep和nvshmem的c++代码。 ✅ 2025-11-28

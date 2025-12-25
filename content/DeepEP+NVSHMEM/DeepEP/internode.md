@@ -9,7 +9,7 @@
 | intranode::dispatch               | <<<20, 768, 8192>>> |
 | intranode::cached_notify_combine  | <<<11, 128>>>       |
 | intranode::combine                | <<<20, 768>>>       |
-
+/
 ## 1. dispatch (internode_ll.cu)
 dispatch kernel 负责MoE的输入tokens根据top-k路由结果分发到不同expert ranks，**并接收来自其他ranks发过来的tokens**。
 ```cpp
@@ -324,7 +324,7 @@ for (int i = expert_begin_idx; i < expert_end_idx; ++i) {
     }
     ```
     接着对这个warp内的32个lane线程reduce求和拿到当前这个sm对目标专家i预期要发送的token数量（就是这个sum，需要记住这是预先计算出来的，不是真实传输的）。
-4. 接着一直死轮询对应的专家的原子数有没有变成FINISHED_SUM_TAG * 2，因为当nvshmemi_ibgda_put_nbi_warp对目标专家完成一次token的put操作就会+1，在 syncthreads(); 之后专家i要收到的token就是步骤三里面算的sum个，正好抵消。FINISHED_SUM_TAG + sum + (FINISHED_SUM_TAG - sum)；（其实就是实际下的wr和预期要收的wr数量一致）
+4. 接着一直死轮询对应的专家的原子数有没有变成FINISHED_SUM_TAG * 2，因为当nvshmemi_ibgda_put_nbi_warp对目标专家完成一次token的put操作就会+1，在 `syncthreads();` 之后专家i要收到的token就是步骤三里面算的sum个，正好抵消。FINISHED_SUM_TAG + sum + (FINISHED_SUM_TAG - sum)；（其实就是实际下的wr和预期要收的wr数量一致）
 ```cpp
 // 
 while (ld_acquire_global(atomic_finish_counter_per_expert + responsible_expert_idx) != FINISHED_SUM_TAG * 2)
@@ -395,10 +395,5 @@ class Buffer:
         ...
         self.runtime.sync(device_ids, ipc_handles, root_unique_id)
 ```
-
-
-
-
-最后用ld_acquire_global去访问这个原子有没有变成2048来判断
 
 ## 
