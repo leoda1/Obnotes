@@ -164,7 +164,7 @@ python /workspace/liuda/fault/DeepEP/tests/test_low_latency.py --skip-combine --
 
 ```
 # 1 Related
-a. 在DeepEP的[[internode]]内包含了dispatch和combine，二者内使用了nvshmemi_ibgda_put_nbi_warp来通信，以及nvshmemi_ibgda_amo_nonfetch_add给remote进程加原子计数的原理。
+a. 在DeepEP的[[internode_ll.cu]]内包含了dispatch和combine，二者内使用了nvshmemi_ibgda_put_nbi_warp来通信，以及nvshmemi_ibgda_amo_nonfetch_add给remote进程加原子计数的原理。
 b. DeepEP的[[DeepEP+NVSHMEM/DeepEP/ibgda_device.cuh]]内具体写了nvshmemi_ibgda_put_nbi_warp和nvshmemi_ibgda_amo_nonfetch_add的接口。
 c. 具体的传输在NVSHMEM的[[ibgda.cpp]]内实现。
 # 2 Specific Plan
@@ -418,6 +418,7 @@ graph TB
 ```shell
 mlnx_perf -i enp41s0np0
 ```
+### 查看网卡GID
 # 5. question
 ### 5.1 per-PE初始化的话 pe0怎么去给pe1的nic设备初始化？
 在nvshmem内正常情况是每个pe一个nic，所以不能跨进程去db另一个nic。在环境变量内有IBGDA_ENABLE_MULTI_PORT，可以让 `num_selected_devs`的值不会被hardcode成1，所以就可以doorbell多个NIC。具体原因是：
@@ -836,21 +837,20 @@ d. 跨机4卡的时候 新的hang观察到是cpu侧launch后没有变成正常di
 分析：大于两张卡的时候我必须要手动up一下被down的网卡 就可以恢复这一次cudaLaunchKernel，就能正常把dispatch下给cuda去执行。在launch的时候设置了config里面 `cudaLaunchAttributeCooperative`，需要多个GPU同时启动，一旦stream上有任何未完成的操作CUDA Driver就不会把新kernel提交给GPU。所以说明一定是前置的任务无法完成，加上日志后看到，此时收端的dispatch的 `rdma_recv_count` 等发端amo过来等不到，所以一直hang。
 - [x] ~~怀疑1: gpu0跨轨发数据的时候建链有问题。~~于是测试gpu0打对端gpu1，down gpu0的nic0，超时可以正常切换到nic1走发数据到对端。这里mlnx_perf看了gpu0的nic1和gpu1的nic0上都有流量 gpu0的nic0和gpu1的nic1都没有流量（也就是正确切换到红色的路径完成数据的发送）。排除跨轨交差qp有问题的嫌疑(alltoall换的qp的handle，理论上不该有问题的，幸亏这里没出问题)。
 ![[Support DeepEP Fault Tolerance 2025-12-24 21.15.21.excalidraw.svg]]
-- [x] ~~怀疑2~~：gpu1没选到mlx5_0?(因为看到gpu1正常的时候现在的主QP走的就是nic1，但是不懂qp->dev_idx为什么打印的是0，离谱命名。。。nvshmem)
+- [x] ~~怀疑2~~：gpu1(第二张卡)没选到mlx5_0(备份卡)?(因为看到gpu1正常的时候现在的主QP走的就是nic1，但是不懂qp->dev_idx为什么打印的是0，离谱命名。。。nvshmem)
 ```cpp
 // nvshmem内看到dev_idx打印的是selected_dev_idx，得打印selected_dev_idx[0]才是对于的网卡索引。。。。。。。。。。。。。
 dev_qp->dev_idx = selected_dev_idx;
 ```
-- [ ] 怀疑：node2上日志显示都是node1的
-```txt
-[Gloo] Rank 3 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
-BUG_CHECK_Q: AMO backup QP timeout: rank=3, pe=1, qp_id=0, qp->dev_idx=1
-BUG_CHECK_Q: AMO backup QP timeout: rank=2, pe=1, qp_id=0, qp->dev_idx=1
-BUG_CHECK_Q: AMO backup QP timeout: rank=2, pe=1, qp_id=0, qp->dev_idx=1
-BUG_CHECK_Q: AMO backup QP timeout: rank=3, pe=1, qp_id=0, qp->dev_idx=1
-DEADLOCK_HYP_F: dispatch recv waiting: rank=2 <---------------- src_rank=1, wait_cost=4790920801 cycles, iter=10000000
-DEADLOCK_HYP_F: dispatch recv waiting: rank=3 <---------------- src_rank=1, wait_cost=4770576948 cycles, iter=10000000
+- [ ] 怀疑3：node2上日志显示都是node1的，一直都是node1的rank1无法给node2的rank2和rank3发送。这里nsys上看不出来具体是因为什么操作无法完成，gpu侧给不了更多网卡的信息。所以只能去nvshmem内，把QP的GID信息在gpu侧同样写一份（增加了ibgda_get_device_qp内区分主/备 nic上是写主还是备份ep的spn + iid），拓展了 `nvshmemi_ibgda_device_qp_v1`来存GID(就是spn+iid)。此时就可以在gpu侧打印出来GID信息了。
+```cpp
+dev_qp->spn = primary_device_ref->rc.backup_peer_ep_handles[ep_idx].spn;
+dev_qp->iid = primary_device_ref->rc.backup_peer_ep_handles[ep_idx].iid;
 ```
+
+在加上GID信息后，确定为GPU2在给GPU0发的时候，由于0b01网卡down，红色超时，所以gpu2认为自己的mlx5_0坏了。所以后续GPU2发给GPU1的时候都走备份QP(此时GPU1的备份网卡还是刚刚down的GPU0的主网卡)，看到gpu2切到了gid是0200网卡mlx5_1，但是node1的gid:0b01是down的，所以hang住。所以对于每个GPU的局部视角来看，都应该存的是我到对面GPU走主的通还是不通，而不是看每个GPU的主网卡通还是不通。所以修改每个GPU上的存网卡状态的变量为 每个gpu对所有其他gpu走主nic通还是不通。测试后能够run，至此多卡容错应该是不会再出现问题了吧。。。。。
+![[Support DeepEP Fault Tolerance 2025-12-28 11.15.48.excalidraw.svg]]
+%%[[Support DeepEP Fault Tolerance 2025-12-28 11.15.48.excalidraw.md|🖋 Edit in Excalidraw]]%%
 
 
 - [ ] RDMA 操作是异步的，CQE 可能还没生成，这个时候去nvshmemi_ibgda_check_cq导致超时？需要看看为啥主的QP会被判定为故障

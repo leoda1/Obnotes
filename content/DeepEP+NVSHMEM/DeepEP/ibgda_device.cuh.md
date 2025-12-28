@@ -224,7 +224,7 @@ __device__ static __forceinline__ nvshmemi_ibgda_device_qp_t* ibgda_get_rc(int p
 }
 ```
 ## 7. ibgda_poll_cq
-deepep搬运缩减了nvshmem的nvshmem的轮训cq的实现，逻辑是：消费者索引小于nic上的真实索引的条件下，一直轮训硬件的cq队列，确认该cq条目已经完成并准备好被消费。
+deepep搬运缩减了nvshmem的nvshmem的轮询cq的实现，逻辑是：消费者索引小于nic上的真实索引的条件下，一直轮训硬件的cq队列，确认该cq条目已经完成并准备好被消费。
 * 先取出了一下三个重要变量：cq->cons_idx（消费者索引）、cq->cqe->wqe_counter（真实硬件完成队列）、cq->ncqes是cq队列条目总数。
 * `idx - wqe_counter - 2 < ncqes` 这里通过uint16的边界65535(-1)，来让当前条件变为idx - 1一定完成。外面调用ibgda_poll_cq的时候传的idx本来就是当前wqe的next index，所以idx在这里面通过这个条件就可以知道当前wqe确保已经完成。
 * memory_fence_cta() 确保所有的内存访问操作都是有序的
