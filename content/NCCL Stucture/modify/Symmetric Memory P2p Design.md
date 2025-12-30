@@ -1,5 +1,5 @@
 # 0 Related work
-在[[diff from 1 to 7]]内，ceAlltoall使用了对称内存来完成数据的传输。需要参考这里的同步机制来实现VCCL机内不hang。
+在[[ceAlltoall的完整实现：]]内，ceAlltoall使用了对称内存来完成数据的传输。需要参考这里的同步机制来实现VCCL机内不hang。
 # 1 具体实现
 ## 1.1 nccl内可参考部分
 

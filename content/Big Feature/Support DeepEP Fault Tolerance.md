@@ -168,259 +168,8 @@ a. 在DeepEP的[[internode_ll.cu]]内包含了dispatch和combine，二者内使�
 b. DeepEP的[[DeepEP+NVSHMEM/DeepEP/ibgda_device.cuh]]内具体写了nvshmemi_ibgda_put_nbi_warp和nvshmemi_ibgda_amo_nonfetch_add的接口。
 c. 具体的传输在NVSHMEM的[[ibgda.cpp]]内实现。
 # 2 Specific Plan
-## 2.1 nvshmem ibgda create backup QP
-在 `nvshmemt_init` 函数中枚举 IB 设备后，根据网卡配置创建备份 QP 映射关系：
-- **一卡一口**：相邻网卡互备（mlx5_0↔mlx5_1, mlx5_2↔mlx5_3, mlx5_4↔mlx5_5, mlx5_6↔mlx5_7）
-- **一卡两口**：同一网卡的两个端口互备
-- 建backup QP，CQ等等
-### 2.1.1 扩展数据结构
-在拓展ibgda的结构的时候有个很坑的点就是nvshmemi_ibgda_device_state_v1的内存布局是极其严格的，新定义的任何变量破坏了结构都会导致runtime的时候出错。所以在 `nvshmemt_ibgda_state_t` 结构体添加备份QP字段的时候选择了自己定义一整个结构体，然后8bytes的结构体指针放到nvshmemi_ibgda_device_state_v1内。
-```cpp
-typedef struct {
-	...
-	nvshmemi_ibgda_ft_state_t *extra;  // Fault tolerance state (NULL if not enabled)
-	uint8_t reserved[NVSHMEMI_IBGDA_STATE_PADDING];
-} nvshmemi_ibgda_device_state_v1;
-static_assert(sizeof(nvshmemi_ibgda_device_state_v1) == 8384,
-              "ibgda_device_state_v1 must be 8384 bytes.");
-```
-具体的结构如下，每个变量的大致用途参考注释：
-```cpp
-typedef enum {
-    IBGDA_QP_HEALTH_GOOD = 0,        // QP 健康，使用主 QP
-    IBGDA_QP_HEALTH_SUSPECTED = 1,   // 检测到失败，但未达到阈值
-    IBGDA_QP_HEALTH_FAILED = 2,      // 已切换到备份 QP
-    IBGDA_QP_HEALTH_RECOVERING = 3   // 正在尝试切回主 QP
-} ibgda_qp_health_status_t;
-
-typedef struct {
-    // Backup RC connections
-    uint32_t num_backup_rc_per_pe;               // 每个 PE 的备份 RC 数量
-    int num_default_rc_per_pe;                   // 默认 RC 数量（用于恢复）
-    nvshmemi_ibgda_device_qp_t *backup_rcs;      // 备份 RC QP 数组
-    nvshmemi_ibgda_device_cq_t *backup_cqs;      // 备份 CQ 数组
-    
-    // Health monitoring (per RC connection)
-    uint8_t *rc_health_status;                   // ibgda_qp_health_status_t
-    uint32_t *rc_failure_count;                  // 连续失败计数
-    uint64_t *rc_last_check_time;                // 上次检查时间（clock64 周期数）
-    uint64_t *rc_switch_time;                    // 切换时间戳
-    
-    // Configuration parameters
-    uint64_t recovery_interval_cycles;           // 恢复重试间隔（GPU 时钟周期）
-    uint32_t failure_threshold;                  // 连续失败多少次触发切换
-    uint32_t check_interval;                     // 每隔多少次操作检查一次 CQ
-    float gpu_clock_freq_ghz;                    // GPU 时钟频率
-} nvshmemi_ibgda_ft_state_t;
-```
-### 2.1.2 分配和初始化备份数组
-在 `nvshmemt_init` 中，在 `ibgda_state` 分配后，分配备份映射数组内存
-```cpp
-// 在 ibgda_state 字段赋值处添加
-ibgda_state->backup_dev_ids = (int *)malloc(MAX_NUM_PES_PER_NODE * sizeof(int));
-ibgda_state->backup_port_ids = (int *)malloc(MAX_NUM_PES_PER_NODE * sizeof(int));
-ibgda_state->is_single_port_card = (bool *)malloc(MAX_NUM_PES_PER_NODE * sizeof(bool));
-```
-### 2.1.3 实现备份映射逻辑
-在 `nvshmemt_init` 函数中，设备枚举完成后，添加备份映射创建函数调用。
-**新增函数 `ibgda_create_backup_mapping`**：
-  1. 遍历所有已枚举的设备（`ibgda_state->n_dev_ids`）
-  2. 检查每个设备的 `phys_port_cnt`：
-     - 若 `== 1`：一卡一口，使用相邻配对策略（i 与 i^1 配对，即 0↔1, 2↔3, 4↔5, 6↔7）
-     - 若 `== 2`：一卡两口，查找同一设备的另一端口
-  3. 填充 `backup_dev_ids[]` 和 `backup_port_ids[]` 数组
-  4. 对于无法找到备份的设备，记录警告日志
-  
-一卡一口:
-```cpp
-for i in 0..n_dev_ids:
-    device_id = dev_ids[i]
-    device = devices[device_id]
-    
-    if device.phys_port_cnt == 1:
-        // 相邻配对：i XOR 1
-        backup_idx = i XOR 1
-        if backup_idx < n_dev_ids:
-            backup_dev_ids[i] = dev_ids[backup_idx]
-            backup_port_ids[i] = port_ids[backup_idx]
-```
-一卡两口:
-```cpp
-if device.phys_port_cnt == 2:
-    // 查找同一设备的另一个端口
-    for j in 0..n_dev_ids:
-        if dev_ids[j] == device_id && port_ids[j] != port_ids[i]:
-            backup_dev_ids[i] = dev_ids[j]
-            backup_port_ids[i] = port_ids[j]
-            break
-```
-### 2.1.4 连接建立时
-#### a. 设置备份设备ID、备份端口ID和备份RC结构
-在`ibgda_connect_device_resources`函数内按照如下逻辑去写每个设备的RC'结构体，就可以正确应用前面的全局的表backup_dev_ids和backup_port_ids到设备结构体内去。
-```cpp
-// Initialize backup device/port mapping based on ibgda_state backup mappings
-    int backup_mapping_idx = -1;
-    for (int j = 0; j < ibgda_state->n_dev_ids; j++) {
-        if (ibgda_state->dev_ids[j] == dev_idx && 
-            ibgda_state->port_ids[j] == portid) {
-            backup_mapping_idx = j;
-            break;
-        }
-    }
-    if (backup_mapping_idx != -1) {
-        // Set backup device and port information in the RC structure
-        device->rc.backup_dev_id = ibgda_state->backup_dev_ids[backup_mapping_idx];
-        device->rc.backup_port_id = ibgda_state->backup_port_ids[backup_mapping_idx];
-        status = ibgda_allocate_backup_rc_structures(t, device, num_rc_eps_per_pe * n_pes);
-        INFO(ibgda_state->log_level,
-             "Device dev_idx=%d port=%d has backup: dev_id=%d port=%d",
-             dev_idx, portid, device->rc.backup_dev_id, device->rc.backup_port_id);
-    } else {
-        device->rc.backup_dev_id = -1;
-        device->rc.backup_port_id = -1;
-    }
-```
-device内的rc内现在有了backup的设备和端口信息后，我们需要和主rc一样去allocate它的handles数据和端点数组，参考 [[ibgda.cpp#a. 分配peer_ep_handles 数组 | 这里的解释]]。
-`ibgda_allocate_backup_rc_structures` 函数的逻辑就是同样根据是首次还是多次去alloc和realloc不同num_rc_eps的备份handle和备份eps，这里实现和`ibgda_allocate_rc_structures`类似。
-不同的是：这里我们需要增加的是device->rc.num_backup_eps_per_pe这个变量去单独计数，原来allocate RC的函数内用的是device->rc.num_eps_per_pe，需要单独计数，不然创建endpoint的时候backup rc会直接用主rc的计数，直接把handle和eps写在了主的后面，主的拓展的时候就乱了。
-```cpp
-static int ibgda_allocate_backup_rc_structures(nvshmem_transport_t t, struct ibgda_device *device, int num_rc_eps) {
-    int status = 0;
-    if (device->backup_peer_ep_handles == NULL) {
-        device->rc.backup_peer_ep_handles =
-            (struct ibgda_rc_handle *)calloc(num_rc_eps, sizeof(*device->rc.backup_peer_ep_handles));
-    } else {
-        size_t new_size = device->rc.num_backup_eps_per_pe * t->n_pes + num_rc_eps;
-        device->rc.backup_peer_ep_handles = (struct ibgda_rc_handle *)realloc(device->rc.backup_peer_ep_handles, new_size * sizeof(*device->rc.backup_peer_ep_handles));
-    }
-	 if (device->rc.backup_eps == NULL) {
-		 device->rc.backup_eps = (struct ibgda_ep **)calloc(num_rc_eps, sizeof(*device->rc.backup_eps));
-	 } else {
-		 size_t new_size = device->rc.num_backup_eps_per_pe * t->n_pes + num_rc_eps;
-		 device->rc.backup_eps = (struct ibgda_ep **)realloc(device->rc.backup_eps, new_size * sizeof(*device->rc.backup_eps));
- }
-    return status;
-}
-```
-#### b. 创建RC endpoint
-在Phase 4的`ibgda_connect_device_endpoints`内，主RC endpoint创建后立即创建backup rc endpoint。
-```cpp
-// Phase 4: Per-device endpoint setup (cached)
-static int ibgda_connect_device_endpoints(nvshmemt_ibgda_state_t *ibgda_state,
-                                          struct ibgda_device *device, int portid,
-                                          nvshmem_transport_t t) {
-	 // ... setup DCT,DCI,RC
-	 // Setup RC endpoints
-    status = ibgda_setup_rc_endpoints(ibgda_state, device, portid, t,
-                                      ibgda_state->options->IBGDA_NUM_RC_PER_PE);
-    if (status) return status;
-	 // Setup Backup RC endpoints
-    if (device->rc.backup_dev_id != -1) {
-        struct ibgda_device *backup_device = (struct ibgda_device *)ibgda_state->devices + device->rc.backup_dev_id;
-        status = ibgda_setup_backup_rc_endpoints(ibgda_state, device, backup_device, device->rc.backup_port_id, t);
-        if (status) return status;
-    }
-  // ...
-```
-`ibgda_setup_backup_rc_endpoints` 实现参考 [[ibgda.cpp#2.2 ibgda_setup_rc_endpoints|主RC endpoints的setup函数]]的逻辑实现。
-
-#### c. GPU状态设置
-在 Phase 5（ibgda_setup_gpu_state）里，ibgda_populate_rc_gpu_data 和 ibgda_populate_backup_rc_gpu_data 会把主/备 QP 的 device 视角结构体一起发布到 nvshmemi_ibgda_device_state_t，并匹配 rc_`health_`status、rc_switch_time 等监控数组。运行时一旦 CQ 检测到失败，设备端就能根据这些索引迅速切到 backup RC——无需再触发 host 端 allocate。
-
-## 2.2 Check CQ status and checkout to backup QP
-这个部分就要兼顾上层DeepEP调用 `nvshmemi_ibgda_put_nbi_warp` 和 `nvshmemi_ibgda_amo_nonfetch_add`后如何优雅的检查当前CQ状态和快速切换QP。NVSHMEM和DeepEP的内存布局不一致，具体原因见[[DeepEP+NVSHMEM/NVSHMEM/ibgda_device.cuh#2.1 ibgda_get_rc| ibgda_device.cuh]]，所以最终nvshmem又降版本到3.4.5。
-思路就是：在DeepEP内nvshmemi_ibgda_put_nbi_warp的时候，发送数据的每个warp的threadIdx.1去看当前cq的完成状态，如果有问题就去更新当前QP的状态机，并切换到backup QP重新发送一次。
-### 2.2.1 nvshmemi_ibgda_use_backup_qp
-这个接口想囊括住update QP status, check CQ status and checkout backup QP这三个功能。
-```cpp
-__device__ static __forceinline__ bool nvshmemi_ibgda_use_backup_qp(int qp_idx, nvshmemi_ibgda_device_cq_t *cq) {
-    nvshmemi_ibgda_device_state_t* state = ibgda_get_state();
-    uint8_t health = state->globalmem.rc_health_status[qp_idx];
-    if (health == IBGDA_QP_HEALTH_FAILED) {
-        uint64_t switch_time = state->globalmem.rc_switch_time[qp_idx];
-        if (ibgda_time_elapsed(switch_time, state->recovery_interval_cycles)) {
-            state->globalmem.rc_health_status[qp_idx] = IBGDA_QP_HEALTH_RECOVERING;
-            state->globalmem.rc_failure_count[qp_idx] = 0;
-            return false; // use main QP
-        }
-        return true;  // continue using backup QP
-    }
-    if (health == IBGDA_QP_HEALTH_GOOD) {
-        uint64_t last_check = state->globalmem.rc_last_check_time[qp_idx];
-        unint64_t current = ibgda_get_clock_cycles();
-        if (current - last_check)
-    }
-}
-```
-
-## 2.3 Checkout to normal QP
-
-# 3. Overall
-首先，在初始化阶段根据网卡拓扑为每条 RC 连接预先建立一条备份 QP，并在设备状态里维护主备 QP 的对应关系及健康监控所需的元数据。
-* 一卡一口时采用相邻网卡互备；
-* 一卡两口时采用同卡双口互备；
-
-其后，故障检测和切换完全在 GPU 侧完成。DeepEP 在发起 RDMA 操作后由 GPU 线程直接检查 CQ 是否超时或返回错误，通过一个简单的健康状态机为每条 QP 维护健康状态、连续失败次数以及最近切换时间。一旦某条主 QP 被判定故障，GPU 立即选择对应的备份 QP，重新计算本地/远端地址与密钥并发起传输，无需回到主机端重新建立连接，从而把故障切换的时延和开销降到最低。
-
-最后，为避免长期停留在备份 QP 影响带宽和资源利用，机制按 GPU 时钟周期设置恢复窗口：在一段时间内探测正常且失败计数清零后，状态机会自动把流量从备份 QP 切回主 QP，在 可靠性与性能之间取得平衡。
-```mermaid
-graph TB
-    subgraph HostNode[计算节点]
-        App[训练框架 / 专家路由层]
-        CommAbstraction[GPU 通信抽象层]
-        IBGDA[IBGDA 传输层]
-
-        subgraph GPUblk[GPU 侧]
-            GPU[GPU / SMs]
-            DevState[IBGDA 设备状态镜像<br/>主 RC / 备份 RC / 健康状态]
-        end
-
-        subgraph NICblk[网卡与端口]
-            subgraph NIC0[网卡 0]
-                P0_0[端口 0（主或备通道）]
-                P0_1[端口 1（双口卡互备）]
-            end
-            subgraph NIC1[网卡 1]
-                P1_0[端口 0（单口卡互备）]
-                P1_1[端口 1]
-            end
-        end
-    end
-
-    subgraph Remote[远端节点（抽象）]
-        RGPU[远端 GPU]
-        RNIC[远端网卡和端口]
-    end
-
-    App --> CommAbstraction --> IBGDA
-    IBGDA -->|初始化：设备枚举<br/>主备映射 f_backup| NICblk
-
-    App -. dispatch / combine 调用 .-> CommAbstraction
-    CommAbstraction -->|GPU 端通信请求| GPU
-    GPU -->|查询设备状态| DevState
-
-    DevState -->|根据健康状态选择<br/>主 RC 或备份 RC| IBGDA
-
-    IBGDA -->|主通道 RC QP| P0_0
-    IBGDA -->|备份通道 RC QP| P1_0
-
-    P0_0 -. 主 RC 传输 .-> RNIC
-    P1_0 -. 备份 RC 传输 .-> RNIC
-
-    RNIC --> RGPU
-```
-![[Support DeepEP Fault Tolerance 2025-11-10 21.03.35.excalidraw  | 100%]]
-# 4. uni-test
-### down口
-测试的时候通过网卡或者交换机down口，所有操作见[[How to Down RNIC Port]]。
-### 查看网卡流量
-用mlnx_perf + ibstat看到的对应网卡名字
-```shell
-mlnx_perf -i enp41s0np0
-```
-### 查看网卡GID
-# 5. question
-### 5.1 per-PE初始化的话 pe0怎么去给pe1的nic设备初始化？
+## NVSHMEM
+### 2.1 per-PE初始化的话 pe0怎么去给pe1的nic设备初始化？
 在nvshmem内正常情况是每个pe一个nic，所以不能跨进程去db另一个nic。在环境变量内有IBGDA_ENABLE_MULTI_PORT，可以让 `num_selected_devs`的值不会被hardcode成1，所以就可以doorbell多个NIC。具体原因是：
 1. uar = mlx5dv_devx_alloc_uar(context, MLX5DV_UAR_ALLOC_TYPE_NC);给每个device分配UAR(user access region)
 2. 用cudaHostRegisterIoMemory把NIC的MMIO区域注册给CUDA
@@ -553,7 +302,7 @@ int nvshmemi_get_devices_by_distance(int *device_arr, int max_dev_per_pe,
     }
 }
 ```
-### 5.2 创建备份QP
+### 2.2 创建备份QP
 在 `nvshmemt_ibgda_connect_endpoints`内我们根据selected_dev_ids已经知道主nic和备份nic，现在就是去备份nic上创建backup QP。在调用 `ibgda_create_qp`给备份nic创建QP的时候，`mapped_i`  使用的和主的mapped_i的索引一致。在 `ibgda_get_rc_handle` 内会从backup_eps内拿到qpn和gid（spn+iid），从device内拿到lid，用于后面alltoall交换。交换后每个QP开始设置状态rst->init->rtr->rts。回过头来的时候，发现这里有一些乱七八糟细节要考虑：
 * 其实selected_dev_ids在大多情况下都是1，默认each gpu会去find最优最近网卡，而我们增加了一个备份的device。怎么还能让原来的走原来的逻辑（dci dct rc），而我们的备份的device只需要rc就够了。这里就先默认了这是单口RNIC情况下的case，因为没有双口环境 我不知道这里的selected_dev_ids会不会实际上测出来是2。所以fault_tolerance_enabled开启的话，我就让num_selected_devs直接写成1，所以大部分ibgda.cpp内原来逻辑可以保留。备份的话这个backup_entry_idx等于selected_dev_ids[1]，也能找到备份device的id。
   当我`ibgda_state->backup_dev_ids[primary_dev_idx] = backup_entry_idx;`的时候就可以让backup_dev_ids的数据里面每个主NIC都能索引到备份NIC。
@@ -619,7 +368,7 @@ rc=3 → dst_pe=0（同 PE，直接 continue）
 备份网卡流量如下：
 ![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251218180542696.png)
 
-### 5.3 备份QP在另一个NIC上，主设备的MR不能直接用于备份QP，所以怎么去给备份设备的PD上注册自己MR？以及lkey和rkey的部分应该怎么设计？
+### 2.3 备份QP在另一个NIC上，主设备的MR不能直接用于备份QP，所以怎么去给备份设备的PD上注册自己MR？以及lkey和rkey的部分应该怎么设计？
 在 `ibgda_mem_handle` 内增加对应的备份MR的需要的字段如下：
 ```cpp
 struct ibgda_mem_handle {
@@ -716,7 +465,7 @@ int nvshmemi_mem_remote_transport::gather_mem_handles(nvshmemi_symmetric_heap &o
     }
 }
 ```
-### 5.4 设计一个ibgda_get_backup_rc能正确索引到在备份NIC上的RC:
+### 2.4 设计一个ibgda_get_backup_rc能正确索引到在备份NIC上的RC:
 在deepep内就是很暴力的直接从rcs数组里面拿出当前pe上的qp_id的qp。所以我们的backup qp也选择暴力的直接从我们准备好的backup_rcs数组上拿出当前pe上的qp_id的backup qp。这里的qp_id在dispatch传下来的时候是 `dst_expert_local_idx` 。按照如下设计：
 ```cpp
 __device__ static __forceinline__ nvshmemi_ibgda_device_qp_t* ibgda_get_backup_rc(int pe, int id) {
@@ -748,8 +497,109 @@ for (int j = 0; j < n_devs_selected; j++) {
                         n_devs_selected + backup_dev_slot);
 }
 ```
-### 5.5 怎么设计一个高效的cq检查
-在只使用primary QP / backup QP都能完成deepep的internode ibgda后，写了第一版本出故障后切到backup QP发送数据的逻辑。就是直接看当前这次QP的wqe是否前进了，超时拿不到cq就直接用backup的rc重新准备wqe再下wr和amo操作。然后就hang了。。。
+### 2.5 怎么设计cq check判断
+在只使用primary QP / backup QP都能完成deepep的internode ibgda后，写了第一版本出故障后切到backup QP发送数据的逻辑。把核心逻辑就是直接看当前这次QP的wqe是否前进了，超时拿不到cq就直接用backup的rc重新准备wqe再下wr和amo操作。nvshmem提供的逻辑cq检查是在 `while ((static_cast<uint16_t>(static_cast<uint16_t>(idx) - wqe_counter - static_cast<uint16_t>(2)) < ncqes));`内死等真实的网卡wqe_counter推进到用户的wqe的idx，我这里while改成了if，然后再外层套一个while计算时间，来规定它死等变成判断我规定时间内wqe超时。设计如下：
+```cpp
+// Wrap-safe CQ completion predicate reused by both polling and timed wait.
+// NVSHMEM convention: we compare against `idx` which is maintained as (wqe_idx + 1).
+__device__ static __forceinline__ bool ibgda_cq_completed(nvshmemi_ibgda_device_cq_t* cq, uint64_t idx) {
+    const auto cqe64 = static_cast<mlx5_cqe64*>(cq->cqe);
+    const uint32_t ncqes = cq->ncqes;
+
+    memory_fence_cta();
+    if (*cq->cons_idx >= idx) return true;
+
+    // See comments in `ibgda_poll_cq` for the wrap-safe comparison.
+    const uint16_t wqe_counter = HtoBE16(ld_na_relaxed(&cqe64->wqe_counter));
+    return (static_cast<uint16_t>(static_cast<uint16_t>(idx) - wqe_counter - static_cast<uint16_t>(2)) >= ncqes);
+}
+
+// 用一个超时检查把ibgda_cq_completed()包起来, 省略如下：
+__device__ static __forceinline__ bool nvshmemi_ibgda_check_cq() {
+    constexpr uint64_t kTimeoutCycles = static_cast<uint64_t>(15.0 * 1.5e9);
+    // ......
+    do {
+        if (ibgda_cq_completed(cq, idx)) return false;
+        if ((ibgda_get_clock_cycles() - start_time) > kTimeoutCycles) {
+            if (target_pe >= 0 && target_pe < 32) {
+                atomicExch(reinterpret_cast<unsigned int*>(&deep_ep_ibgda_primary_bad[target_pe]), 1u);
+            }
+            return true;  // Timeout = failure
+        }
+    } while (true);
+}
+```
+
+
+# 3. Overall
+首先，在初始化阶段根据网卡拓扑为每条 RC 连接预先建立一条备份 QP，并在设备状态里维护主备 QP 的对应关系及健康监控所需的元数据。
+* 一卡一口时采用相邻网卡互备；
+* 一卡两口时采用同卡双口互备；
+
+其后，故障检测和切换完全在 GPU 侧完成。DeepEP 在发起 RDMA 操作后由 GPU 线程直接检查 CQ 是否超时或返回错误，通过一个简单的健康状态机为每条 QP 维护健康状态、连续失败次数以及最近切换时间。一旦某条主 QP 被判定故障，GPU 立即选择对应的备份 QP，重新计算本地/远端地址与密钥并发起传输，无需回到主机端重新建立连接，从而把故障切换的时延和开销降到最低。
+
+最后，为避免长期停留在备份 QP 影响带宽和资源利用，机制按 GPU 时钟周期设置恢复窗口：在一段时间内探测正常且失败计数清零后，状态机会自动把流量从备份 QP 切回主 QP，在 可靠性与性能之间取得平衡。
+```mermaid
+graph TB
+    subgraph HostNode[计算节点]
+        App[训练框架 / 专家路由层]
+        CommAbstraction[GPU 通信抽象层]
+        IBGDA[IBGDA 传输层]
+
+        subgraph GPUblk[GPU 侧]
+            GPU[GPU / SMs]
+            DevState[IBGDA 设备状态镜像<br/>主 RC / 备份 RC / 健康状态]
+        end
+
+        subgraph NICblk[网卡与端口]
+            subgraph NIC0[网卡 0]
+                P0_0[端口 0（主或备通道）]
+                P0_1[端口 1（双口卡互备）]
+            end
+            subgraph NIC1[网卡 1]
+                P1_0[端口 0（单口卡互备）]
+                P1_1[端口 1]
+            end
+        end
+    end
+
+    subgraph Remote[远端节点（抽象）]
+        RGPU[远端 GPU]
+        RNIC[远端网卡和端口]
+    end
+
+    App --> CommAbstraction --> IBGDA
+    IBGDA -->|初始化：设备枚举<br/>主备映射 f_backup| NICblk
+
+    App -. dispatch / combine 调用 .-> CommAbstraction
+    CommAbstraction -->|GPU 端通信请求| GPU
+    GPU -->|查询设备状态| DevState
+
+    DevState -->|根据健康状态选择<br/>主 RC 或备份 RC| IBGDA
+
+    IBGDA -->|主通道 RC QP| P0_0
+    IBGDA -->|备份通道 RC QP| P1_0
+
+    P0_0 -. 主 RC 传输 .-> RNIC
+    P1_0 -. 备份 RC 传输 .-> RNIC
+
+    RNIC --> RGPU
+```
+![[Support DeepEP Fault Tolerance 2025-11-10 21.03.35.excalidraw  | 100%]]
+# 4. self-test
+## 4.1 测试小手册
+### down口
+测试的时候通过网卡或者交换机down口，所有操作见[[How to Down RNIC Port]]。
+### 查看网卡流量
+用mlnx_perf + ibstat看到的对应网卡名字
+```shell
+mlnx_perf -i enp41s0np0
+```
+### 查看网卡GID
+这一部分通过在nvshmem内拓展get_device_qp的函数(可以把sqn和iid写到qp内)，并在device_qp的结构体增加这两个字段，后期在deepep的kernel内就可以打印出来QP的gid，来debug走备份的时候每个备份网卡是不是走到正确的规定的backup nic的gid。
+## 4.2 debug
+下面以a-z的顺序记录hang的过程：
+
 a. 排查了一大段时间，发现是submit wr的时候之前没注意到low_latency的话准备好4个wqe才doorbell一次。在调用 `nvshmemi_ibgda_put_nbi_warp` 如果没给模版参数传kAlwaysDoPostSend就会导致这个问题，传递true给kAlwaysDoPostSend后往前走了一步。
 ```cpp
 template <bool kAlwaysDoPostSend>
@@ -852,15 +702,14 @@ dev_qp->iid = primary_device_ref->rc.backup_peer_ep_handles[ep_idx].iid;
 ![[Support DeepEP Fault Tolerance 2025-12-28 11.15.48.excalidraw.svg]]
 %%[[Support DeepEP Fault Tolerance 2025-12-28 11.15.48.excalidraw.md|🖋 Edit in Excalidraw]]%%
 
-
-- [ ] RDMA 操作是异步的，CQE 可能还没生成，这个时候去nvshmemi_ibgda_check_cq导致超时？需要看看为啥主的QP会被判定为故障
 - [ ] 当NIC0默认坏掉的时候 GPU0会找到最优网卡是NIC1，然后就又会去把NIC0当做backup，需要增加if condition确保选择的备份至少是一个好的nic
-# log
+# 5. time-line
 - [x] Fixing NVSHMEM memory issue ✅ 2025-12-03
 - [x] 修改后的DeepEP python能链接到修改后的deepep和nvshmem的c++代码。 ✅ 2025-11-28
 - [x] 设置num_selected_devs为2  ✅ 2025-12-06
 - [x] 修复primary+backup切换到backup NIC上的QP发送数据测试✅ 2025-12-08
 - [x] 修复backup rc退出destory的coredump✅ 2025-12-09
 - [x] 修复物理down口时 重新计算backup rc的时候 索引到backup QP但是使用的是primary NIC的QPN✅ 2025-12-10
-- [ ] 修复物理down口时 现在的nvshmemi_ibgda_check_cq为什么会在low_latency和normal下表现出超时/没问题 但是切换都不对的问题
-- [ ] 变更为receiver看哪个口失败 然后拿到backupqp id整个dispatch完全重发
+- [x] 修复物理down口时 现在的nvshmemi_ibgda_check_cq为什么会在low_latency和normal下表现出超时/没问题 但是切换都不对的问题✅ 2025-12-24
+- [x] 变更为receiver看哪个口失败 然后拿到backupqp id整个dispatch完全重发✅ 2025-12-27
+- [ ] 优化代码结构，测试初版容错性能

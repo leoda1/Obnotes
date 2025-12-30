@@ -58,5 +58,3 @@ Receiver (rank 1):
          ├─ stream
          └─ events[MAXSTEPS--16]
 ```
-
-![[Support IntraNode P2p and Support Heterogeneous GPU Vendor in FlagCX 2025-10-30 18.44.29.excalidraw]]

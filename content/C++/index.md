@@ -8,7 +8,7 @@
 
 [2.2 lamda表达式](https://www.notion.so/2-2-lamda-1a8cb70356ad80948ce6e0958b072b10?pvs=21)
 
-[2.3 智能指针（C++98到c++20）](https://www.notion.so/2-3-C-98-c-20-1a8cb70356ad80d4bbb7f6cfb07cbf16?pvs=21)
+[[2.3 智能指针（C++98到c++20）]]
 
 [2.4 右值引用 | 移动语义 | 完美转发](https://www.notion.so/2-4-1a8cb70356ad8058a75ad1c02714f331?pvs=21)
 

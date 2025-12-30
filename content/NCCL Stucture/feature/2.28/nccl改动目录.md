@@ -5,7 +5,7 @@
 * 增加 GIN（GPU-Initiated Networking，GPU 发起网络通信） 的初始框架，当前仍在开发中。
 * 引入通过 ncclDevCommCreate 创建的设备端通信器（device communicators）。
 * 启用带同步（ncclLsaBarrierSession）与内存访问器（ncclGetLsaPointer, ncclGetLsaMultimemPointer）的设备端通信操作。
-# [[diff from 1 to 7]]
+# [[ceAlltoall的完整实现：]]
 # 1. 对称内存Symmetric memory
 * ncclGroupStart/End的API支持对称操作。
 * 使用设备端 API 重写对称内核。
