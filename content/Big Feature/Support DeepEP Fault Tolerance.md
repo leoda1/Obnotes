@@ -1,5 +1,4 @@
 # 0 Base
- git clone DeepEP/nvshmem，然后把deepEP下面的third-party内的nvshmem patch的改动加到自己的nvshmem上。
 ## 0.1 Compile and Test NVSHMEM
 ### compile
 这里的-DNVSHMEM_BUILD_PYTHON_LIB=OFF一定需要设置。
@@ -163,13 +162,33 @@ python /workspace/liuda/fault/DeepEP/tests/test_low_latency.py --skip-combine --
 # export NVSHMEM_DEBUG=INFO
 
 ```
+## 0.3 Megatron-LM
+nvshmem容错主要用于支持moe场景使用deepep的训练。下面为使用容错必要的步骤：
+#### 模型配置
+首先需要检查 `Megatron-LM/config/xxxx.sh` 内已经添加DeepEP的环境变量：
+```shell
+--moe-token-dispatcher-type flex \
+--moe-enable-deepep \
+```
+#### 启动配置
+在`Megatron-LM/script/xxxx.sh` 内增加
+```shell
+# <0, 1>, default is 0 (disabled).
+export NCCL_ENABLE_FAULT_TOLERANCE=1
+# NIC configuration must be specified  according to runtime environment.
+export NCCL_IB_HCA=="mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1"
+# <0, 1>, default is 0 (disabled).
+export NVSHMEM_IBGDA_ENABLE_FAULT_TOLERANCE=1
+# <0, 1>, default is 0 (disabled).
+export NVSHMEM_IBGDA_ENABLE_MULTI_PORT=1
+```
+
 # 1 Related
-a. 在DeepEP的[[internode_ll.cu]]内包含了dispatch和combine，二者内使用了nvshmemi_ibgda_put_nbi_warp来通信，以及nvshmemi_ibgda_amo_nonfetch_add给remote进程加原子计数的原理。
+a. 在DeepEP的[[internode_ll.cu]]内包含了lowlatency模式的dispatch和combine，[[internode.cu]]内包含了normal模式的dispatch和combine，二者都使用了nvshmemi_ibgda_put_nbi_warp来通信，以及nvshmemi_ibgda_amo_nonfetch_add给remote进程加原子计数。
 b. DeepEP的[[DeepEP+NVSHMEM/DeepEP/ibgda_device.cuh]]内具体写了nvshmemi_ibgda_put_nbi_warp和nvshmemi_ibgda_amo_nonfetch_add的接口。
-c. 具体的传输在NVSHMEM的[[ibgda.cpp]]内实现。
+c. 具体的传输层的init在NVSHMEM的[[ibgda.cpp]]内实现。
 # 2 Specific Plan
-## NVSHMEM
-### 2.1 per-PE初始化的话 pe0怎么去给pe1的nic设备初始化？
+## 2.1 per-PE初始化的话 pe0怎么去给pe1的nic设备初始化？
 在nvshmem内正常情况是每个pe一个nic，所以不能跨进程去db另一个nic。在环境变量内有IBGDA_ENABLE_MULTI_PORT，可以让 `num_selected_devs`的值不会被hardcode成1，所以就可以doorbell多个NIC。具体原因是：
 1. uar = mlx5dv_devx_alloc_uar(context, MLX5DV_UAR_ALLOC_TYPE_NC);给每个device分配UAR(user access region)
 2. 用cudaHostRegisterIoMemory把NIC的MMIO区域注册给CUDA
@@ -246,7 +265,7 @@ static int nvshmemi_pick_adjacent_nic(int primary, int total) {
 ```
 现在可以看到selected_devices的选择变成2，那么每个gpu执行到 `status = tcurr->host_ops.connect_endpoints(tcurr, selected_devices, found_devices);`  的时候就可以拿到这里我提前计算好主和备网卡id的数组。测试如下：
 ![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251204161310418.png)
-#### a. nvshmem支持多device的条件
+### a. nvshmem支持多device的条件
 回过头来思考了一下，`nvshmemi_get_devices_by_distance` 为什么只选一张最近网卡，难道nvshmem不支持选择多个网卡吗？ 结论：不支持，除非一个GPU挂同一个PCIe switch，Switch后面接两个NIC，这样就会出现NIC到GPU都是PIX。
 在该函数的实现里面，nvshmem直接暴力获取所有gpu和NIC的sysfs路径。在`get_pci_distance` 去根据公共的前缀 / NUMA节点把网卡标记为（pix/ pxb / phb / node/ sys / count），`pci_distance_perf[]` 给出“越近数值越大”的评分。`pe_dev_pairs` 会存所有 ((PE, GPU), NIC) 组合，并按 distance 从近到远排序（比较的是枚举值）。再由两次for loop去找到当前GPU最优NIC和平衡一个NIC被多个GPU绑定。<mark style="background: #FF5582A6;">一旦某个 GPU 的第 0 个 slot（最优）已经拿到，比如 PIX；当后面遇到 PXB/PHB 这种更差的，就触发上面的 -2 填充，把该 GPU 的剩余 slot 全部封掉。</mark>最终用 `mype_array_index` 把本GPU的槽位写到输出的* device_arr指针。
 大致核心代码如下：
@@ -302,7 +321,7 @@ int nvshmemi_get_devices_by_distance(int *device_arr, int max_dev_per_pe,
     }
 }
 ```
-### 2.2 创建备份QP
+## 2.2 创建备份QP
 在 `nvshmemt_ibgda_connect_endpoints`内我们根据selected_dev_ids已经知道主nic和备份nic，现在就是去备份nic上创建backup QP。在调用 `ibgda_create_qp`给备份nic创建QP的时候，`mapped_i`  使用的和主的mapped_i的索引一致。在 `ibgda_get_rc_handle` 内会从backup_eps内拿到qpn和gid（spn+iid），从device内拿到lid，用于后面alltoall交换。交换后每个QP开始设置状态rst->init->rtr->rts。回过头来的时候，发现这里有一些乱七八糟细节要考虑：
 * 其实selected_dev_ids在大多情况下都是1，默认each gpu会去find最优最近网卡，而我们增加了一个备份的device。怎么还能让原来的走原来的逻辑（dci dct rc），而我们的备份的device只需要rc就够了。这里就先默认了这是单口RNIC情况下的case，因为没有双口环境 我不知道这里的selected_dev_ids会不会实际上测出来是2。所以fault_tolerance_enabled开启的话，我就让num_selected_devs直接写成1，所以大部分ibgda.cpp内原来逻辑可以保留。备份的话这个backup_entry_idx等于selected_dev_ids[1]，也能找到备份device的id。
   当我`ibgda_state->backup_dev_ids[primary_dev_idx] = backup_entry_idx;`的时候就可以让backup_dev_ids的数据里面每个主NIC都能索引到备份NIC。
@@ -362,13 +381,13 @@ rc=3 → dst_pe=0（同 PE，直接 continue）
 
 打印看到：
 ![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251208153427330.png)
-#### 主/备 卡流量测试
+### 主/备 卡流量测试
 在gpu0上测试internode_ll可以看到原来网卡流量如下:
 ![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251218180730828.png)
 备份网卡流量如下：
 ![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251218180542696.png)
 
-### 2.3 备份QP在另一个NIC上，主设备的MR不能直接用于备份QP，所以怎么去给备份设备的PD上注册自己MR？以及lkey和rkey的部分应该怎么设计？
+## 2.3 备份QP在另一个NIC上，主设备的MR不能直接用于备份QP，所以怎么去给备份设备的PD上注册自己MR？以及lkey和rkey的部分应该怎么设计？
 在 `ibgda_mem_handle` 内增加对应的备份MR的需要的字段如下：
 ```cpp
 struct ibgda_mem_handle {
@@ -465,7 +484,7 @@ int nvshmemi_mem_remote_transport::gather_mem_handles(nvshmemi_symmetric_heap &o
     }
 }
 ```
-### 2.4 设计一个ibgda_get_backup_rc能正确索引到在备份NIC上的RC:
+## 2.4 设计一个ibgda_get_backup_rc能正确索引到在备份NIC上的RC:
 在deepep内就是很暴力的直接从rcs数组里面拿出当前pe上的qp_id的qp。所以我们的backup qp也选择暴力的直接从我们准备好的backup_rcs数组上拿出当前pe上的qp_id的backup qp。这里的qp_id在dispatch传下来的时候是 `dst_expert_local_idx` 。按照如下设计：
 ```cpp
 __device__ static __forceinline__ nvshmemi_ibgda_device_qp_t* ibgda_get_backup_rc(int pe, int id) {
@@ -497,7 +516,7 @@ for (int j = 0; j < n_devs_selected; j++) {
                         n_devs_selected + backup_dev_slot);
 }
 ```
-### 2.5 怎么设计cq check判断
+## 2.5 怎么设计cq check判断
 在只使用primary QP / backup QP都能完成deepep的internode ibgda后，写了第一版本出故障后切到backup QP发送数据的逻辑。把核心逻辑就是直接看当前这次QP的wqe是否前进了，超时拿不到cq就直接用backup的rc重新准备wqe再下wr和amo操作。nvshmem提供的逻辑cq检查是在 `while ((static_cast<uint16_t>(static_cast<uint16_t>(idx) - wqe_counter - static_cast<uint16_t>(2)) < ncqes));`内死等真实的网卡wqe_counter推进到用户的wqe的idx，我这里while改成了if，然后再外层套一个while计算时间，来规定它死等变成判断我规定时间内wqe超时。设计如下：
 ```cpp
 // Wrap-safe CQ completion predicate reused by both polling and timed wait.
@@ -529,6 +548,20 @@ __device__ static __forceinline__ bool nvshmemi_ibgda_check_cq() {
     } while (true);
 }
 ```
+## 2.6 统一vccl和nvshmem容错
+### a. VCCL/NVSHMEM超时判定
+==vccl认为超时的时间如下：==
+```cpp
+NCCL_PARAM(IbTimeout, "IB_TIMEOUT", 18);
+NCCL_PARAM(IbRetryCnt, "IB_RETRY_CNT", 7);
+```
+modify_qp会把这两个信息写到QP内，当poll cq或者说wc在这个时间无法完成则认为现在口已经down了需要切换到backup nic上的qp。这两个参数在nccl的document内写明，一次完整的QP超时的时间为：
+$$
+QP_{timeout} = 4.096 \mu s \times 2  ^  \text{IB\_TIMEOUT}  \times  \text{IB\_RETRY\_CNT}
+$$
+当前的配置 4.096$\mu s$ x 2<sup>18</sup> x 7 = 2,147,483.648$\mu s$  x 7 = 15,032,385.536$\mu s$ =15s左右。
+==nvshmem现在为10s左右==
+### b. 设计
 
 
 # 3. Overall
@@ -585,7 +618,6 @@ graph TB
 
     RNIC --> RGPU
 ```
-![[Support DeepEP Fault Tolerance 2025-11-10 21.03.35.excalidraw  | 100%]]
 # 4. self-test
 ## 4.1 测试小手册
 ### down口
@@ -600,7 +632,7 @@ mlnx_perf -i enp41s0np0
 ## 4.2 debug
 下面以a-z的顺序记录hang的过程：
 
-a. 排查了一大段时间，发现是submit wr的时候之前没注意到low_latency的话准备好4个wqe才doorbell一次。在调用 `nvshmemi_ibgda_put_nbi_warp` 如果没给模版参数传kAlwaysDoPostSend就会导致这个问题，传递true给kAlwaysDoPostSend后往前走了一步。
+==a. ==排查了一大段时间，发现是submit wr的时候之前没注意到low_latency的话准备好4个wqe才doorbell一次。在调用 `nvshmemi_ibgda_put_nbi_warp` 如果没给模版参数传kAlwaysDoPostSend就会导致这个问题，传递true给kAlwaysDoPostSend后往前走了一步。
 ```cpp
 template <bool kAlwaysDoPostSend>
 __device__ static __forceinline__ void ibgda_submit_requests(...) {
@@ -616,7 +648,7 @@ __device__ static __forceinline__ void ibgda_submit_requests(...) {
 }
 ```
 
-b. 在随机某个时刻随机down某个nic的时候(这是一个n方的复杂度了 干)，发现有时候会切到备份，有时候切不到。在经过减少process，去掉combine，在dispatch的thread/warp/sm/kernel/process各种力度打印日志，最后观察到如果随机down网卡deepep会hang在以下两种情况：
+==b.== 在随机某个时刻随机down某个nic的时候(这是一个n方的复杂度了 干)，发现有时候会切到备份，有时候切不到。在经过减少process，去掉combine，在dispatch的thread/warp/sm/kernel/process各种力度打印日志，最后观察到如果随机down网卡deepep会hang在以下两种情况：
 
 **case1:** down了之后dispatch的收端的在`while ((num_recv_tokens == 0))`，持续无法退出。所以说明发端没有正确完成rdma_recv_count的amo更新。
 * 刚down的时刻，backup nic没看见流量，说明切的时刻虽然切了backup QP，但是有东西计算错了。（假设最开始主的nic在跑，down备份nic不会影响主的nic）
@@ -665,7 +697,7 @@ DEADLOCK_HYP_R: dispatch kernel exit: responsible_expert_idx=0
 
 时隔3天，因为put操作的时候正常，我amo就会认为也正常，到amo的时候网卡down了就gg。在amo内也加上了检查cq，确保amo能完成写到对端再退出。同时在amo读取deep_ep_ibgda_primary_is_bad的时候__threadfence()一下。（amo是一个<mark style="background: #FF5582A6;">warp group的lane0</mark>线程执行，而deep_ep_ibgda_primary_is_bad变量是每个下put操作的<mark style="background: #FF5582A6;">warp的lane0</mark>去写）。此时以为大功告成。
 
-c. 测试了一圈后，hang在了下一个地方。排查发现我必须手动去up主nic才能完成容错，这个case分析起来就说明nvshmem内控制面某个地方还在走主nic没走备份nic。（因为nvshmem默认topo选pcie最近的nic（only one））
+==c.== 测试了一圈后，hang在了下一个地方。排查发现我必须手动去up主nic才能完成容错，这个case分析起来就说明nvshmem内控制面某个地方还在走主nic没走备份nic。（因为nvshmem默认topo选pcie最近的nic（only one））
 
 解决方案：
 因为nccl/vccl暂时还没有兼容当前deepep的nvshmem的网卡级别容错，所以dispatch/combine用的nccl改gloo来先all_gather。例如第一次all_gather要去拿group组内的topk，走nccl的allgather的话就直接hang（cause nccl不知道nic down了）。
@@ -682,7 +714,7 @@ all_topk_idx = all_topk_idx_cpu.to(device='cuda')
 ```
 201/23机器 /etc/nccl.conf设置了一下这两个机器各自的GLOO_SOCKET_IFNAME，测试发现现在down口能切到备份网卡，都没问题。此时以为又大功告成了。
 
-d. 跨机4卡的时候 新的hang观察到是cpu侧launch后没有变成正常dispatch，gpu侧也调度不上。
+==d.== 跨机4卡的时候 新的hang观察到是cpu侧launch后没有变成正常dispatch，gpu侧也调度不上。
 ![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251224160636299.png)
 分析：大于两张卡的时候我必须要手动up一下被down的网卡 就可以恢复这一次cudaLaunchKernel，就能正常把dispatch下给cuda去执行。在launch的时候设置了config里面 `cudaLaunchAttributeCooperative`，需要多个GPU同时启动，一旦stream上有任何未完成的操作CUDA Driver就不会把新kernel提交给GPU。所以说明一定是前置的任务无法完成，加上日志后看到，此时收端的dispatch的 `rdma_recv_count` 等发端amo过来等不到，所以一直hang。
 - [x] ~~怀疑1: gpu0跨轨发数据的时候建链有问题。~~于是测试gpu0打对端gpu1，down gpu0的nic0，超时可以正常切换到nic1走发数据到对端。这里mlnx_perf看了gpu0的nic1和gpu1的nic0上都有流量 gpu0的nic0和gpu1的nic1都没有流量（也就是正确切换到红色的路径完成数据的发送）。排除跨轨交差qp有问题的嫌疑(alltoall换的qp的handle，理论上不该有问题的，幸亏这里没出问题)。
@@ -692,7 +724,7 @@ d. 跨机4卡的时候 新的hang观察到是cpu侧launch后没有变成正常di
 // nvshmem内看到dev_idx打印的是selected_dev_idx，得打印selected_dev_idx[0]才是对于的网卡索引。。。。。。。。。。。。。
 dev_qp->dev_idx = selected_dev_idx;
 ```
-- [ ] 怀疑3：node2上日志显示都是node1的，一直都是node1的rank1无法给node2的rank2和rank3发送。这里nsys上看不出来具体是因为什么操作无法完成，gpu侧给不了更多网卡的信息。所以只能去nvshmem内，把QP的GID信息在gpu侧同样写一份（增加了ibgda_get_device_qp内区分主/备 nic上是写主还是备份ep的spn + iid），拓展了 `nvshmemi_ibgda_device_qp_v1`来存GID(就是spn+iid)。此时就可以在gpu侧打印出来GID信息了。
+- [x] 怀疑3：node2上日志显示都是node1的，一直都是node1的rank1无法给node2的rank2和rank3发送。这里nsys上看不出来具体是因为什么操作无法完成，gpu侧给不了更多网卡的信息。所以只能去nvshmem内，把QP的GID信息在gpu侧同样写一份（增加了ibgda_get_device_qp内区分主/备 nic上是写主还是备份ep的spn + iid），拓展了 `nvshmemi_ibgda_device_qp_v1`来存GID(就是spn+iid)。此时就可以在gpu侧打印出来GID信息了。
 ```cpp
 dev_qp->spn = primary_device_ref->rc.backup_peer_ep_handles[ep_idx].spn;
 dev_qp->iid = primary_device_ref->rc.backup_peer_ep_handles[ep_idx].iid;
@@ -702,7 +734,35 @@ dev_qp->iid = primary_device_ref->rc.backup_peer_ep_handles[ep_idx].iid;
 ![[Support DeepEP Fault Tolerance 2025-12-28 11.15.48.excalidraw.svg]]
 %%[[Support DeepEP Fault Tolerance 2025-12-28 11.15.48.excalidraw.md|🖋 Edit in Excalidraw]]%%
 
-- [ ] 当NIC0默认坏掉的时候 GPU0会找到最优网卡是NIC1，然后就又会去把NIC0当做backup，需要增加if condition确保选择的备份至少是一个好的nic
+==e.== internode.cu hang
+按理说和internode_ll的切换逻辑一致，这里不应该hang。发现deepep的test_internode如果加了nsys抓日志就会奇怪报错。。。 然后双机还必须16卡来测试，internode早期kernel内hardcode了一些8卡的逻辑，16卡加日志就很难观察。。。。。 然后在 `bench_kineto`内完全不打印日志。。。。
+- [ ] 怀疑1:这里的dispatch有多种角色，是不是不同角色之间加入down网口用不用的QP，结果另一个角色不知道，就会hang。
+- [x] ~~怀疑2: `bench_kineto` 导致的？为什么internode的在tuning完全打不出来。。。。。排除，先去掉了tuning阶段来debug。~~
+- [ ] 怀疑3:超时会打印barrier_block内的日志显示 `DeepEP timeout check failed: ... ` 然后后面有一个trap();这个会去调用ptx的指令写入 `asm("trap;");` 就会导致立即停止 kernel。于是把trap变成break。可以让代码在down口后继续走容错而不是直接停止kernel。
+```cpp
+__forceinline__ __device__ void barrier_block(int** barrier_signal_ptrs, int rank) {
+    // ...
+    if (thread_id < kNumRanks) {
+        atomicAdd_system(barrier_signal_ptrs[rank] + thread_id, FINISHED_SUM_TAG);
+        atomicSub_system(barrier_signal_ptrs[thread_id] + rank, FINISHED_SUM_TAG);
+    }
+    // ...
+    while (true) {
+        auto value = thread_id < kNumRanks ? ld_volatile_global(barrier_signal_ptrs[rank] + thread_id) : 0;
+        if (__all_sync(0xffffffff, value <= 0))
+            break;
+
+        if (clock64() - start_time > NUM_TIMEOUT_CYCLES and thread_id < kNumRanks) {
+            printf("DeepEP timeout check failed: rank = %d, thread = %d, value = %d)\n", rank, thread_id, value);
+            trap();
+        }
+    }
+    __syncthreads();
+}
+```
+在test_internode.py内会测试两种dispatch（cached / no cached），对应到internode.cu内表现就是先调用cached_notify / notify_dispatch + internode::dispatch，combine只有一种组合就是cached_notify + internode::combine。notify_dispatch和cached_notify的详细说明见：[[internode.cu#2. cached_notify(internode.cu)| 2]]
+
+
 # 5. time-line
 - [x] Fixing NVSHMEM memory issue ✅ 2025-12-03
 - [x] 修改后的DeepEP python能链接到修改后的deepep和nvshmem的c++代码。 ✅ 2025-11-28
@@ -712,4 +772,5 @@ dev_qp->iid = primary_device_ref->rc.backup_peer_ep_handles[ep_idx].iid;
 - [x] 修复物理down口时 重新计算backup rc的时候 索引到backup QP但是使用的是primary NIC的QPN✅ 2025-12-10
 - [x] 修复物理down口时 现在的nvshmemi_ibgda_check_cq为什么会在low_latency和normal下表现出超时/没问题 但是切换都不对的问题✅ 2025-12-24
 - [x] 变更为receiver看哪个口失败 然后拿到backupqp id整个dispatch完全重发✅ 2025-12-27
-- [ ] 优化代码结构，测试初版容错性能
+- [x] 优化代码结构，测试初版容错性能✅ 2026-1-4
+- [ ] 找到internode容错hang的原因并修复

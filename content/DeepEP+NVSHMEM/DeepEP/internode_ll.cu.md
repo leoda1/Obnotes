@@ -395,5 +395,3 @@ class Buffer:
         ...
         self.runtime.sync(device_ids, ipc_handles, root_unique_id)
 ```
-
-## 

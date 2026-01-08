@@ -113,4 +113,4 @@ def forward(ctx, group, input, output_split_sizes, input_split_sizes):
         )
         return output
 ```
-combine的过程与之相反。
+combine的过程与之相反。更具体参考：[[token dispatcher]]

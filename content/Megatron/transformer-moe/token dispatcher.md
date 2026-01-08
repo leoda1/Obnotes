@@ -107,7 +107,7 @@ permuted_input = [
     tokens[2],  # expert 2 的第 2 个 token
 ]
 ```
-### FLex
+### MoEFlexTokenDispatcher
 
 
 ## Combine
