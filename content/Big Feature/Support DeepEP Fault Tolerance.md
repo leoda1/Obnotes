@@ -630,8 +630,8 @@ mlnx_perf -i enp41s0np0
 ### 查看网卡GID
 这一部分通过在nvshmem内拓展get_device_qp的函数(可以把sqn和iid写到qp内)，并在device_qp的结构体增加这两个字段，后期在deepep的kernel内就可以打印出来QP的gid，来debug走备份的时候每个备份网卡是不是走到正确的规定的backup nic的gid。
 ## 4.2 debug
-下面以a-z的顺序记录hang的过程：
-
+下面以a-z的顺序记录所有hang和bug的过程：
+### low_latency kernel bugs
 ==a. ==排查了一大段时间，发现是submit wr的时候之前没注意到low_latency的话准备好4个wqe才doorbell一次。在调用 `nvshmemi_ibgda_put_nbi_warp` 如果没给模版参数传kAlwaysDoPostSend就会导致这个问题，传递true给kAlwaysDoPostSend后往前走了一步。
 ```cpp
 template <bool kAlwaysDoPostSend>
@@ -734,11 +734,13 @@ dev_qp->iid = primary_device_ref->rc.backup_peer_ep_handles[ep_idx].iid;
 ![[Support DeepEP Fault Tolerance 2025-12-28 11.15.48.excalidraw.svg]]
 %%[[Support DeepEP Fault Tolerance 2025-12-28 11.15.48.excalidraw.md|🖋 Edit in Excalidraw]]%%
 
-==e.== internode.cu hang
+### normal dispatch/combine kernel bugs in moe traing
+
+==e.== internode.cu 的notify dispatch的nvshmem_sync_with_same_gpu_idx操作导致的hang
 按理说和internode_ll的切换逻辑一致，这里不应该hang。发现deepep的test_internode如果加了nsys抓日志就会奇怪报错。。。 然后双机还必须16卡来测试，internode早期kernel内hardcode了一些8卡的逻辑，16卡加日志就很难观察。。。。。 然后在 `bench_kineto`内完全不打印日志。。。。
-- [ ] 怀疑1:这里的dispatch有多种角色，是不是不同角色之间加入down网口用不用的QP，结果另一个角色不知道，就会hang。
+- [x] ~~怀疑1：这里的dispatch有多种角色，是不是不同角色之间加入down网口用不用的QP，结果另一个角色不知道，就会hang。~~
 - [x] ~~怀疑2: `bench_kineto` 导致的？为什么internode的在tuning完全打不出来。。。。。排除，先去掉了tuning阶段来debug。~~
-- [ ] 怀疑3:超时会打印barrier_block内的日志显示 `DeepEP timeout check failed: ... ` 然后后面有一个trap();这个会去调用ptx的指令写入 `asm("trap;");` 就会导致立即停止 kernel。于是把trap变成break。可以让代码在down口后继续走容错而不是直接停止kernel。
+- [x] ~~怀疑3:超时会打印barrier_block内的日志显示 `DeepEP timeout check failed: ... ` 然后后面有一个trap();这个会去调用ptx的指令写入 `asm("trap;");` 就会导致立即停止 kernel。于是把trap变成break。可以让代码在down口后继续走容错而不是直接停止kernel。~~
 ```cpp
 __forceinline__ __device__ void barrier_block(int** barrier_signal_ptrs, int rank) {
     // ...
@@ -760,7 +762,35 @@ __forceinline__ __device__ void barrier_block(int** barrier_signal_ptrs, int ran
     __syncthreads();
 }
 ```
-在test_internode.py内会测试两种dispatch（cached / no cached），对应到internode.cu内表现就是先调用cached_notify / notify_dispatch + internode::dispatch，combine只有一种组合就是cached_notify + internode::combine。notify_dispatch和cached_notify的详细说明见：[[internode.cu#2. cached_notify(internode.cu)| 2]]
+- [x] ~~怀疑4: notify_dispatch的kernel内还有 `nvshmem_sync_with_same_gpu_idx`，这个又走了nvshmem的amo接口，底层nvshmem这一层接口不知道容错的信息。~~
+在test_internode.py内会测试两种dispatch（cached / no cached），对应到internode.cu内表现就是先调用cached_notify / notify_dispatch + internode::dispatch，combine只有一种组合就是cached_notify + internode::combine。notify_dispatch和cached_notify的详细说明见：[[internode.cu#2. cached_notify(internode.cu)]]，这两种notify内的nvshmem_sync_with_same_gpu_idx会调用`nvshmem_sync` 或者 `nvshmem_sync_all`。
+```cpp
+template <bool kLowLatencyMode>
+__forceinline__ __device__ void nvshmem_sync_with_same_gpu_idx(const nvshmem_team_t& rdma_team) {
+    kLowLatencyMode ? void(nvshmem_sync(rdma_team)) : nvshmem_sync_all();
+}
+```
+默认的话就走 `nvshmem_sync_all` 那么调用栈就是：
+```txt
+nvshmem_sync_all() (device端)
+  → nvshmemi_sync_threadgroup()
+    → nvshmemi_sync_algo_threadgroup()
+      → sync_dissem_pow2_threadgroup()
+        → nvshmemi_signal_for_barrier()  // 发送信号
+            → nvshmemi_transfer_amo_nonfetch()
+                → nvshmemi_ibgda_amo_nonfetch()
+                    → nvshmemi_ibgda_amo_nonfetch_impl()
+        → nvshmemi_wait_until_greater_than_equals()  // 等待信号
+            → nvshmemi_check_timeout_and_log()
+```
+在直接deepep内写了一个nvshmem_sync_all类似的同步后，仍然hang。打印看到，假如down了NIC1的网卡，那么机内GPU走到barrier_block内对应的 `barrier_signal_ptrs[rank] + thread_id` 地址不能正确被清零，导致其他GPU也hang住。直接 `__syncthreads();`看到GPU1进了nvshmem_sync_with_same_gpu_idx没出来，同时去观察了其他GPU在barrier的表现画出下图：
+rank按照行的方式完成8个位置的atomic加，thread按照列的方式去atomic减，完全一次机内所有rank的同步。R0T0一直到R7T7都是连续对称内存，提前注册。**现在问题为：假如down了NIC1的网卡，rank1前面哪里卡住了出不来，导致机内所有rank里面thread1减不完。**
+![[Support DeepEP Fault Tolerance 2026-01-12 15.40.19.excalidraw.svg]]
+%%[[Support DeepEP Fault Tolerance 2026-01-12 15.40.19.excalidraw.md|🖋 Edit in Excalidraw]]%%
+在 `nvshmemi_ibgda_amo_nonfetch_impl`内对QP同样增加容错后，实践发现可以正常完成 `nvshmem_sync_all()`操作并退出。观察到对应代码行前后的trace数量一致。该hang解决。
+
+f. 
+
 
 
 # 5. time-line
@@ -773,4 +803,5 @@ __forceinline__ __device__ void barrier_block(int** barrier_signal_ptrs, int ran
 - [x] 修复物理down口时 现在的nvshmemi_ibgda_check_cq为什么会在low_latency和normal下表现出超时/没问题 但是切换都不对的问题✅ 2025-12-24
 - [x] 变更为receiver看哪个口失败 然后拿到backupqp id整个dispatch完全重发✅ 2025-12-27
 - [x] 优化代码结构，测试初版容错性能✅ 2026-1-4
-- [ ] 找到internode容错hang的原因并修复
+- [x] 找到internode容错hang的原因并修复✅ 2026-1-12
+- [ ] 
