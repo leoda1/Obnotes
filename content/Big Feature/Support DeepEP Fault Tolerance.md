@@ -562,7 +562,7 @@ $$
 当前的配置 4.096$\mu s$ x 2<sup>18</sup> x 7 = 2,147,483.648$\mu s$  x 7 = 15,032,385.536$\mu s$ =15s左右。
 ==nvshmem现在为10s左右==
 ### b. 设计
-
+在训练内假设极端case为：notify阶段的sync_all需要所有qp清空当前cq，而此时正好出发了vccl容错->nvshmem容错，一共需要25秒，所以我在NVL机内barrier_block的kernel调整超时为30s以确保跨轨走pxn聚合时，不同号gpu可以正确拿到走了两个容错极端case的数据。
 
 # 3. Overall
 首先，在初始化阶段根据网卡拓扑为每条 RC 连接预先建立一条备份 QP，并在设备状态里维护主备 QP 的对应关系及健康监控所需的元数据。
@@ -629,6 +629,16 @@ mlnx_perf -i enp41s0np0
 ```
 ### 查看网卡GID
 这一部分通过在nvshmem内拓展get_device_qp的函数(可以把sqn和iid写到qp内)，并在device_qp的结构体增加这两个字段，后期在deepep的kernel内就可以打印出来QP的gid，来debug走备份的时候每个备份网卡是不是走到正确的规定的backup nic的gid。
+### 修改管理网卡名
+```shell
+// node23机器上
+ip link show
+ifconfig enp163s0f0 down
+ip link set enp163s0f0 name enp86s0f0
+show_gids
+// ssh到某个计算网卡的ipv4上
+ip link set enp86s0f0 up
+```
 ## 4.2 debug
 下面以a-z的顺序记录所有hang和bug的过程：
 ### low_latency kernel bugs
@@ -718,7 +728,9 @@ all_topk_idx = all_topk_idx_cpu.to(device='cuda')
 ![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20251224160636299.png)
 分析：大于两张卡的时候我必须要手动up一下被down的网卡 就可以恢复这一次cudaLaunchKernel，就能正常把dispatch下给cuda去执行。在launch的时候设置了config里面 `cudaLaunchAttributeCooperative`，需要多个GPU同时启动，一旦stream上有任何未完成的操作CUDA Driver就不会把新kernel提交给GPU。所以说明一定是前置的任务无法完成，加上日志后看到，此时收端的dispatch的 `rdma_recv_count` 等发端amo过来等不到，所以一直hang。
 - [x] ~~怀疑1: gpu0跨轨发数据的时候建链有问题。~~于是测试gpu0打对端gpu1，down gpu0的nic0，超时可以正常切换到nic1走发数据到对端。这里mlnx_perf看了gpu0的nic1和gpu1的nic0上都有流量 gpu0的nic0和gpu1的nic1都没有流量（也就是正确切换到红色的路径完成数据的发送）。排除跨轨交差qp有问题的嫌疑(alltoall换的qp的handle，理论上不该有问题的，幸亏这里没出问题)。
-![[Support DeepEP Fault Tolerance 2025-12-24 21.15.21.excalidraw.svg]]
+![[Support DeepEP Fault Tolerance 2026-01-13 15.29.18.excalidraw.svg]]
+%%[[Support DeepEP Fault Tolerance 2026-01-13 15.29.18.excalidraw.md|🖋 Edit in Excalidraw]]%%
+
 - [x] ~~怀疑2~~：gpu1(第二张卡)没选到mlx5_0(备份卡)?(因为看到gpu1正常的时候现在的主QP走的就是nic1，但是不懂qp->dev_idx为什么打印的是0，离谱命名。。。nvshmem)
 ```cpp
 // nvshmem内看到dev_idx打印的是selected_dev_idx，得打印selected_dev_idx[0]才是对于的网卡索引。。。。。。。。。。。。。
@@ -733,7 +745,6 @@ dev_qp->iid = primary_device_ref->rc.backup_peer_ep_handles[ep_idx].iid;
 在加上GID信息后，确定为GPU2在给GPU0发的时候，由于0b01网卡down，红色超时，所以gpu2认为自己的mlx5_0坏了。所以后续GPU2发给GPU1的时候都走备份QP(此时GPU1的备份网卡还是刚刚down的GPU0的主网卡)，看到gpu2切到了gid是0200网卡mlx5_1，但是node1的gid:0b01是down的，所以hang住。所以对于每个GPU的局部视角来看，都应该存的是我到对面GPU走主的通还是不通，而不是看每个GPU的主网卡通还是不通。所以修改每个GPU上的存网卡状态的变量为 每个gpu对所有其他gpu走主nic通还是不通。测试后能够run，至此多卡容错应该是不会再出现问题了吧。。。。。
 ![[Support DeepEP Fault Tolerance 2025-12-28 11.15.48.excalidraw.svg]]
 %%[[Support DeepEP Fault Tolerance 2025-12-28 11.15.48.excalidraw.md|🖋 Edit in Excalidraw]]%%
-
 ### normal dispatch/combine kernel bugs in moe traing
 
 ==e.== internode.cu 的notify dispatch的nvshmem_sync_with_same_gpu_idx操作导致的hang
@@ -789,7 +800,6 @@ rank按照行的方式完成8个位置的atomic加，thread按照列的方式去
 %%[[Support DeepEP Fault Tolerance 2026-01-12 15.40.19.excalidraw.md|🖋 Edit in Excalidraw]]%%
 在 `nvshmemi_ibgda_amo_nonfetch_impl`内对QP同样增加容错后，实践发现可以正常完成 `nvshmem_sync_all()`操作并退出。观察到对应代码行前后的trace数量一致。该hang解决。
 
-f. 
 
 
 
@@ -804,4 +814,3 @@ f.
 - [x] 变更为receiver看哪个口失败 然后拿到backupqp id整个dispatch完全重发✅ 2025-12-27
 - [x] 优化代码结构，测试初版容错性能✅ 2026-1-4
 - [x] 找到internode容错hang的原因并修复✅ 2026-1-12
-- [ ] 
