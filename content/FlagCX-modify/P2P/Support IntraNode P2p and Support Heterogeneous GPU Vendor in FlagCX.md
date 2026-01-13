@@ -1,7 +1,8 @@
 # 0 architecture
 FlagCX内对hostfunc有两种实现，都可用deviceAdaptor来正确调用，此外proxy progress被hostfunc正常触发之后实际的cudaMemcpyAsyc也有deviceAdaptor来正确调用。
 但是与net.cc内不同的是机内p2p需要共享内存来完成数据的/同步信号的跨进程读写。综上整个p2p需要实现的话需要如下结构：
-![[Support IntraNode P2p and Support Heterogeneous GPU Vendor in FlagCx 2025-10-20 15.32.45.excalidraw | 100%]]
+
+%%[[Support IntraNode P2p and Support Heterogeneous GPU Vendor in FlagCX 2026-01-13 16.22.58.excalidraw.md|🖋 Edit in Excalidraw]]%%
 # 1 FlagCX Adaptor
 跨GPU通过bootstrap去交换的是 CUmemAllocationHandleType_enum，我们需要在flagcx内至少支持其中一类，比如 CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR(fd) 。
 

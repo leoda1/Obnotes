@@ -745,9 +745,7 @@ dev_qp->iid = primary_device_ref->rc.backup_peer_ep_handles[ep_idx].iid;
 ```
 
 在加上GID信息后，确定为GPU2在给GPU0发的时候，由于0b01网卡down，红色超时，所以gpu2认为自己的mlx5_0坏了。所以后续GPU2发给GPU1的时候都走备份QP(此时GPU1的备份网卡还是刚刚down的GPU0的主网卡)，看到gpu2切到了gid是0200网卡mlx5_1，但是node1的gid:0b01是down的，所以hang住。所以对于每个GPU的局部视角来看，都应该存的是我到对面GPU走主的通还是不通，而不是看每个GPU的主网卡通还是不通。所以修改每个GPU上的存网卡状态的变量为 每个gpu对所有其他gpu走主nic通还是不通。测试后能够run，至此多卡容错应该是不会再出现问题了吧。。。。。
-
 ![[Support DeepEP Fault Tolerance 2026-01-13 15.27.37.excalidraw.svg | 100%]]
-%%[[Support DeepEP Fault Tolerance 2025-12-28 11.15.48.excalidraw.md|🖋 Edit in Excalidraw]]%%
 
 ### normal dispatch/combine kernel bugs in moe traing
 

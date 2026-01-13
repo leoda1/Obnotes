@@ -1,2 +1,2 @@
 ln -snf /Users/joker/Documents/juwiki/lb content
-npx quartz sync --no-pull
+npx quartz build --serve
