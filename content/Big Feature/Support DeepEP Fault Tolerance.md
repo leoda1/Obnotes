@@ -631,12 +631,14 @@ mlnx_perf -i enp41s0np0
 这一部分通过在nvshmem内拓展get_device_qp的函数(可以把sqn和iid写到qp内)，并在device_qp的结构体增加这两个字段，后期在deepep的kernel内就可以打印出来QP的gid，来debug走备份的时候每个备份网卡是不是走到正确的规定的backup nic的gid。
 ### 修改管理网卡名
 ```shell
-// node23机器上
+// node23机器上 需要开两个terminal
 ip link show
+show_gids
+// ssh到某个计算网卡的ipv4上，等会down了需要这个计算网卡才能进node23
+ssh 10.xxxxxx
+
 ifconfig enp163s0f0 down
 ip link set enp163s0f0 name enp86s0f0
-show_gids
-// ssh到某个计算网卡的ipv4上
 ip link set enp86s0f0 up
 ```
 ## 4.2 debug
@@ -743,8 +745,10 @@ dev_qp->iid = primary_device_ref->rc.backup_peer_ep_handles[ep_idx].iid;
 ```
 
 在加上GID信息后，确定为GPU2在给GPU0发的时候，由于0b01网卡down，红色超时，所以gpu2认为自己的mlx5_0坏了。所以后续GPU2发给GPU1的时候都走备份QP(此时GPU1的备份网卡还是刚刚down的GPU0的主网卡)，看到gpu2切到了gid是0200网卡mlx5_1，但是node1的gid:0b01是down的，所以hang住。所以对于每个GPU的局部视角来看，都应该存的是我到对面GPU走主的通还是不通，而不是看每个GPU的主网卡通还是不通。所以修改每个GPU上的存网卡状态的变量为 每个gpu对所有其他gpu走主nic通还是不通。测试后能够run，至此多卡容错应该是不会再出现问题了吧。。。。。
+
 ![[Support DeepEP Fault Tolerance 2025-12-28 11.15.48.excalidraw.svg]]
 %%[[Support DeepEP Fault Tolerance 2025-12-28 11.15.48.excalidraw.md|🖋 Edit in Excalidraw]]%%
+
 ### normal dispatch/combine kernel bugs in moe traing
 
 ==e.== internode.cu 的notify dispatch的nvshmem_sync_with_same_gpu_idx操作导致的hang
@@ -796,8 +800,10 @@ nvshmem_sync_all() (device端)
 ```
 在直接deepep内写了一个nvshmem_sync_all类似的同步后，仍然hang。打印看到，假如down了NIC1的网卡，那么机内GPU走到barrier_block内对应的 `barrier_signal_ptrs[rank] + thread_id` 地址不能正确被清零，导致其他GPU也hang住。直接 `__syncthreads();`看到GPU1进了nvshmem_sync_with_same_gpu_idx没出来，同时去观察了其他GPU在barrier的表现画出下图：
 rank按照行的方式完成8个位置的atomic加，thread按照列的方式去atomic减，完全一次机内所有rank的同步。R0T0一直到R7T7都是连续对称内存，提前注册。**现在问题为：假如down了NIC1的网卡，rank1前面哪里卡住了出不来，导致机内所有rank里面thread1减不完。**
+
 ![[Support DeepEP Fault Tolerance 2026-01-12 15.40.19.excalidraw.svg]]
 %%[[Support DeepEP Fault Tolerance 2026-01-12 15.40.19.excalidraw.md|🖋 Edit in Excalidraw]]%%
+
 在 `nvshmemi_ibgda_amo_nonfetch_impl`内对QP同样增加容错后，实践发现可以正常完成 `nvshmem_sync_all()`操作并退出。观察到对应代码行前后的trace数量一致。该hang解决。
 
 
