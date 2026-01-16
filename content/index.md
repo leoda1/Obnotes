@@ -6,7 +6,7 @@ title: Home
 这个博客用于放一些在线笔记
 
 ## 📚 主要内容
-- **[[NCCL Stucture/overall|NCCL 架构]]** - NCCL源码和二次开发
+- **[[overall|NCCL 架构]]** - NCCL源码和二次开发
 - **[[CUDA/index|CUDA 编程]]** - CUDA指南和一些接口review
 - **[[pytorch/index|PyTorch]]** - 一些边角料
 - **[[Megatron/index|Megatron]]** - LLM训练和优化

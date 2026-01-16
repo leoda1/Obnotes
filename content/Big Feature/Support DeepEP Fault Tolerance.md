@@ -818,3 +818,4 @@ rank按照行的方式完成8个位置的atomic加，thread按照列的方式去
 - [x] 变更为receiver看哪个口失败 然后拿到backupqp id整个dispatch完全重发✅ 2025-12-27
 - [x] 优化代码结构，测试初版容错性能✅ 2026-1-4
 - [x] 找到internode容错hang的原因并修复✅ 2026-1-12
+- [ ] sync_all试一下break，然后收端增加get。
