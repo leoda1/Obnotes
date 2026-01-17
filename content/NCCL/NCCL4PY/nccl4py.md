@@ -36,4 +36,28 @@ mpirun -np 4 \
 
 ```
 ## 2. VCCL AlltoallV 4py
-
+目前C++接口为:
+```cpp
+ncclResult_t ncclAlltoAllv(const void* sendbuff, const size_t* sendcounts,
+    const size_t* sdispls, void* recvbuff, const size_t* recvcounts, const size_t* rdispls,
+    const void* relaybuff, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
+ncclResult_t pncclAlltoAllv(const void* sendbuff, const size_t* sendcounts,
+    const size_t* sdispls, void* recvbuff, const size_t* recvcounts, const size_t* rdispls,
+    const void* relaybuff, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
+```
+python接口为：
+```python
+def alltoallv(
+        self,
+        sendbuf: NcclBufferSpec,
+        recvbuf: NcclBufferSpec,
+        sendcounts: Sequence[int],
+        sdispls: Sequence[int],
+        recvcounts: Sequence[int],
+        rdispls: Sequence[int],
+        relaybuf: NcclBufferSpec | None = None,
+        *,
+        stream: NcclStreamSpec | None = None,
+    ) -> None:
+```
+**这里count和displs都是nRanks<sup>2</sup>的长度，每个rank能找到自己发给目的rank的长度和起始地址**
