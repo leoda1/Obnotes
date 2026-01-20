@@ -87,3 +87,46 @@ __device__ void runRecv(int tid, int tn, int group, struct ncclDevWorkP2p* work)
           0, group, 1, 1, nullptr, work, stepSize);
 }
 ```
+## 2. xxxTaskAppend
+在`taskAppend`内会对不同的任务走不同任务入队。
+```cpp
+static ncclResult_t taskAppend(struct ncclComm* comm, struct ncclInfo* info) {
+    ncclFunc_t collAPI = info->coll;
+    if (info->coll == ncclFuncSend || info->coll == ncclFuncRecv) {
+        NCCLCHECK(p2pTaskAppend(comm, info, info->coll, collAPI, (void*)info->recvbuff, info->count, info->datatype, info->root, true));
+    } else if (info->coll == ncclFuncPutSignal || info->coll == ncclFuncSignal || info->coll == ncclFuncWaitSignal) {
+        NCCLCHECK(rmaTaskAppend(comm, info));
+    } else if (info->coll == ncclFuncAlltoAllV) {
+        NCCLCHECK(rmaCollTaskAppend(comm, info, info->rmacoll, info->rmaAPI, info->datatype));
+    } else {
+        // ...
+    }
+  
+```
+### 2.1 rmaTaskAppend
+只有三个API会走这里，包括：`ncclPutSignal`， `ncclSignal` 和 `ncclWaitSignal`。
+* WaitSignal（多源等待）：把 info->signalDescs[ ] 转成两段数组 t->peers[ ]、t->nsignals[ ]，表示“要等待哪些 peer 的信号、每个 peer 要等多少次 opCnt”。
+* Signal（纯 signal）：生成一个 ncclTaskRma，但它本身没有数据搬运（你这里把 count 约束为 0），更像是“发信号”的控制类任务。
+* PutSignal（搬运+最后发信号）：生成一个或多个 ncclTaskRma（可能切分），每个 task 携带 src/peer 的 window + offset + bytes；只有最后一个 chunk 的 signalMode 才是 NCCL_SIGNAL，前面的 chunk 用 NCCL_SIGNAL_NONE，避免每块都发信号。
+这里的任务入队
+```cpp
+static ncclResult_t rmaTaskAppend(
+    struct ncclComm* comm,
+    struct ncclInfo* info) {
+    struct ncclKernelPlanner *planner = &comm->planner;
+    void const* srcBuff = info->sendbuff;
+    // Initialize window pointers - only needed for Put and Signal
+    struct ncclDevrWindow* peerWinHost = NULL;
+    struct ncclDevrWindow* srcWinHost = NULL;
+    size_t srcWinOffset = 0;
+    // 只有PutSignal操作计算peerWinHost和srcWinOffset
+    if (info->coll == ncclFuncPutSignal) {
+        struct ncclWindow_vidmem* peerWinDevHost = NULL;
+        NCCLCHECK(ncclShadowPoolToHost(&comm->devrState.shadows, info->peerWin, &peerWinDevHost));
+        peerWinHost = (struct ncclDevrWindow*)peerWinDevHost->winHost;
+        NCCLCHECK(ncclDevrFindWindow(comm, srcBuff, &srcWinHost));
+        srcWinOffset = (char*)srcBuff - (char*)srcWinHost->userPtr;
+    }
+    
+  
+```

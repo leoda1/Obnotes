@@ -14,5 +14,5 @@
 - [x] 过一遍当前进度，弄清楚现在的buffer设计：[vccl moe in feishu](https://infrawaves.feishu.cn/wiki/Oi8twqYNLizawSk0LCPcCpQen4b) 🛫 2026-01-14 ✅ 2026-01-15
 - [x] 增加alltoallv接口，修改sendcounts/recvcounts为指针，增加relay_buffer和它的长度，直接使用nccl4py调用，设计开发测试 🛫 2026-01-15 ✅ 2026-01-16
 - [x] layout部分完成input/output split正确写到sendcounts/recvcounts内，第一行保存每个rank自己在input buffer的长度，第二行保存每个rank自己在input buffer上的开始地址。 ✅ 2026-01-16
-- [ ] taskAppend to planne 🛫 2026-01-19 
+- [ ] taskAppend to planner 🛫 2026-01-19
 - [ ] scheduleRmaTaskToPlan调度：1234(signal) 5(signal)6(signal)7(signal) 
