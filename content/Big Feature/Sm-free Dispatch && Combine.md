@@ -14,5 +14,11 @@
 - [x] 过一遍当前进度，弄清楚现在的buffer设计：[vccl moe in feishu](https://infrawaves.feishu.cn/wiki/Oi8twqYNLizawSk0LCPcCpQen4b) 🛫 2026-01-14 ✅ 2026-01-15
 - [x] 增加alltoallv接口，修改sendcounts/recvcounts为指针，增加relay_buffer和它的长度，直接使用nccl4py调用，设计开发测试 🛫 2026-01-15 ✅ 2026-01-16
 - [x] layout部分完成input/output split正确写到sendcounts/recvcounts内，第一行保存每个rank自己在input buffer的长度，第二行保存每个rank自己在input buffer上的开始地址。 ✅ 2026-01-16
-- [ ] taskAppend to planner 🛫 2026-01-19
+- [x] taskAppend to planner  ✅ 2026-01-27
 - [ ] scheduleRmaTaskToPlan调度：1234(signal) 5(signal)6(signal)7(signal) 
+    - [ ] 按Node算调度逻辑。不按group整了（前面要拿的信息封到一个struct里面由一个func返回）。
+    - [ ] 主for loop以batch来，不按group来。
+    - [ ] batchWork在for loop里创建&enqueue(ncclMemoryStackAlloc)
+    - [ ] 考虑batch为空的情况，跳过
+    - [ ] phase1 and phase4内考虑relaybuff切换
+    - [ ] 每个batch里面的所有CeWait合并成一个，所有的ProxyWait合并成1个
