@@ -14,93 +14,24 @@
 * 在rmaTaskAppend的时候，如果total bytes大于1GB需要再重新入队，我们的Append需要考虑进去。
 * rmaCollTaskAppend内直接算`relaybuff`，`sendbuff`, `recvbuff` 的偏移
 * `planner.rmaTaskQueues` 是一个数组，大小为 numRmaCtx。不同context的任务可以并行，且互不干扰，同一context任务批处理。我需要对应创建为 `collRmaTaskQueue` 数组吗？？？多个ctx，每个ctx内4个具体任务que，竖着按que取任务来做batch。不需要，我直接就一个queue就行，不弄ctx，因为在调度或者执行阶段还可以从这个里面拆出来去决定走哪个stream or ctx。
-* 判断gpu是否同节点，是否同号：
-```cpp
-int peer = comm->p2pSchedule[round].sendRank;
-
-// 判断是否在同一节点
-bool sameNode = (comm->rankToNode[rank] == comm->rankToNode[peer]);
-
-// 获取 localRank（用于判断是否"同号"）
-int myLocalRank = comm->rankToLocalRank[rank];
-int peerLocalRank = comm->rankToLocalRank[peer];
-bool sameLocalRank = (myLocalRank == peerLocalRank);
-```
 * 遍历顺序：参考 [[init.cc#ncclP2pSchedule|p2pschedule逻辑]] 
 ### pseudocode
 综上，伪代码的核心逻辑如下：
-* rmaCollTaskApend的内不碰plan，然后scheduleRmaCollTask内不碰info。
-* 按照round来先去取我当前rank发who， 收who，在每个gpu `R`视角看只有(1，8，9，10，11，12，13，14)的操作是在自己的视角内，我需要用recvRank的index，在它的视角内把(2、5），（3、6），（4、7）的跨轨通信的操作入队到gpu `R`内（因为比如2、5的通讯是我拆出来的 在R视角不知道这件事）。
 
-```cpp
-struct ncclKernelPlanner *planner = &comm->planner;
-comm->p2pSchedGroupSize = groupSize;
-int local = comm->localRank % groupSize; // local id inside my group
-int group = comm->localRank / groupSize; // id of my group, incremented when going over the previous nodes
-int nGroups = comm->nRanks / groupSize;
-int nGroupsPow2 = pow2Up(nGroups);
-int groupDelta=0;
-for (groupRound = 0; groupRound < nGroupsPow2; groupRound ++) {
-    if (groupDelta >= nGroups) { // 过滤无效 delta
-        groupDelta = (groupDelta + groupRound + 1) & (nGroupsPow2 - 1)
-        continue
-    }
-    // intraNode
-    if groupRound == 0 {
-        for (round = 0; round < comm->localRanks; round++) {
-            sendRank = p2pschedule[round].sendRank;
-            recvRank = p2pschedule[round].recvRank;
-            // ... 
-            push sendTask to planner->cePutQueue
-            // ...
-            push recvTask to planner->ceWaitSignalQueue
-        }
-        break;
-    }
-    // interNode
-    int sendGroup = (group + groupDelta) % nGroups;
-    int recvGroup = (group - groupDelta + nGroups) % nGroups;
-    int sendNode = groupToNode[sendGroup];
-    int recvNode = groupToNode[recvGroup];
-    localRank = comm->rankToLocalRank[rank];
-    // get same rail rank index in sendNode and recvNode
-    sendNodeRank = localRankIdToGlobalRankId(input: sendNode[comm->rankToLocalRank(comm->rank)], output: int sendNodeRank);
-    recvNodeRank = localRankIdToGlobalRankId(input: recvNode[comm->rankToLocalRank(comm->rank)], output: int recvNodeRank);
-    // 1,2,3,4,5,6,7
-    if (recvNode need to send data to currentNode with same rail) {
-        for loop all recvNode's localrank（same to rank's localRank） will send to currentNode ranks () {
-            enqueue planner->proxyWaitSignalQueue; // phase1: recvRank --> rank(same rail, internode)
-            enqueue planner->cePutQueue;// phase2: and recvRank --> other ranks in my Node(cross rail, intraNode)
-        }
-    }
-    // 12,13,14
-    if(has recvNode rank need to send data cross-rail to comm->rank) {
-        for loop all recvNode ranks () {
-            // phase3: All ranks except recvRank on recvNode send data to comm->rank(cross rail, intraNode)
-            enque planner->ceWaitSignalQueue;
-        }
-    }
-    // 8,9,10,11
-    if(rank need to send data to sendNode same rail rank) {
-        for loop all sendNode ranks () {
-            // phase4: Rank sends data to all ranks of sendNode(same rail, internode)
-            enqueue planner->proxyPutQueue;
-        }
-    }
-    groupDelta = (groupDelta + groupRound) & (nGroupsPow2 - 1);
-}
-
-```
-![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20260122142242854.png)
 
 ## 3. schedule
+### batch = 0
+在batch0内，每个rankR的任务就是我发会机内其他和收机内其他rank的任务（p2pschedule的sendRank/recvRank那套）。rankR会去先执行下一个nodeRound的机间的任务，也就是我这个rank发给下一个节点/收到上一个节点的所有同轨/跨轨任务。如图：
+![[vccl alltoallv dev log 2026-01-29 19.36.31.excalidraw.svg]]
+%%[[vccl alltoallv dev log 2026-01-29 19.36.31.excalidraw.md|🖋 Edit in Excalidraw]]%%
+### batch > 0
+从batch1的任务开始，所有机内的任务都是同轨机间任务的转发。比如下面路径13就是上一个节点内localRank=2的gpu发到我当前节点的localRank=2的gpu，再转发到rank R内。同理，路径6就是rankR给路径3的转发。以上完成接收侧pxn。
+![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20260122142242854.png)
 ![](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20260121204353219.png)
-A. RDMA 跨机：同轨 对端 → 本地 relay 的 PutSignal + WaitSignal
-* WaitSignal（remote-in）：等待“同轨 rank 发给我 relay 的多个 PutSignal”
-* PutSignal（remote-out）：我向同轨对端 relay 发多个 PutSignal
-B. NVL/CE 机内：relay → 本机多 rank 的 PutSignal + WaitSignal
-* PutSignal（local-out）：我把 relaybuff 的数据分发给本机多 rank
-* WaitSignal（local-in）：等待本机其他 rank 把 relaybuff 中的数据拷给我
+### 对称内存地址/偏移怎么使用
+#### ce 机内
+
+#### proxy 机间
 ## 4. summary
 ```mermaid
 graph TB
