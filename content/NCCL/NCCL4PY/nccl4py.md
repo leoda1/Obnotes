@@ -29,6 +29,7 @@ export PYTHONPATH=/workspace/liuda/iw/VCCL/nccl4py/build:$PYTHONPATH
 export LD_LIBRARY_PATH=/workspace/liuda/iw/VCCL/build/lib:$LD_LIBRARY_PATH
 mpirun -np 4 \
         --allow-run-as-root \
+        -x LD_LIBRARY_PATH=/workspace/liuda/iw/VCCL/build/lib:$LD_LIBRARY_PATH \
         python examples/01_basic/03_alltoallv.py
 ```
 发包
@@ -61,3 +62,6 @@ def alltoallv(
     ) -> None:
 ```
 **这里count和displs都是nRanks<sup>2</sup>的长度，每个rank能找到自己发给目的rank的长度和起始地址**
+
+## 3. test example
+vccl alltoallv的测试脚本路径为： `VCCL/nccl4py/examples/01_basic/03_alltoallv.py`

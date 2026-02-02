@@ -8,7 +8,7 @@
 * 完整的无核alltoallv的开发[[vccl alltoallv dev log]]
 * 
 ### d. VCCL Document
-* 简洁明了的对外说明and使用doc [[sm-free alltoallv for moe training]]
+* 简洁明了的对外说明andc [[sm-free alltoallv for moe training]]
 
 ## 2. timeline
 - [x] 过一遍当前进度，弄清楚现在的buffer设计：[vccl moe in feishu](https://infrawaves.feishu.cn/wiki/Oi8twqYNLizawSk0LCPcCpQen4b) 🛫 2026-01-14 ✅ 2026-01-15

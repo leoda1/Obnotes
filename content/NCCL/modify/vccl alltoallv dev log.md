@@ -1,12 +1,19 @@
+---
+tags:
+  - moe
+  - vccl
+  - alltoallv
+状态: doing
+---
 ## 1. struct
 ![[1d45e817-ba03-4cbb-a871-3e1bac980564.png]]
 
 ## 2. rmaCollTaskAppend
 主要是colllective.cc内 `ncclEnqueueCheck` 会把INFO参数解析成什么，并以什么形式放到planner内。新增的rmaTaskAppend接口参考： [[enqueue.cc#2.1 rmaTaskAppend|rmaTaskAppend]]。以及meta ncclx的实现:[[vccl alltoallv dev log#meta ncclx|meta ncclx]]，下面是开始coding前一些需要考虑的代码因素：
 * 新增的结构体 && 变量：
-    * 新的cc类型就是 `ncclFuncAlltoAllV` ✅
-    * 新的任务结构体是 `ncclTaskRmaColl` ，任务链表为：`collRmaTaskQueue`，挂到planner内。✅
-    * 我们多了displays / 额外的count / relaybuff，可能需要在 `ncclInfo` 结构体内增加5个变量。✅
+    * 新的cc类型就是 `ncclFuncAlltoAllV` 
+    * 新的任务结构体是 `ncclTaskRmaColl` ，任务链表为：`collRmaTaskQueue`，挂到planner内。
+    * 我们多了displays / 额外的count / relaybuff，可能需要在 `ncclInfo` 结构体内增加5个变量。
 * relaybuff，当rank i 发给rank j的时候（跨机）：
     *  1. i 侧使用putSignal到 i' 节点的relaybuff，给 i' 发一个signal
     * 2. i' 侧 NVL/CE 的put操作从relay_buff拷贝到recvbuff，给j发signal
@@ -31,7 +38,12 @@
 ### 对称内存地址/偏移怎么使用
 #### ce 机内
 
+
+
 #### proxy 机间
+
+
+
 ## 4. summary
 ```mermaid
 graph TB
@@ -95,67 +107,41 @@ graph TB
 综上，rmaColl内应该的流程如下：
 ```mermaid
 graph TB
-    subgraph "RMA Collective Task (ncclTaskRmaColl) 调用路径"
-        B1[用户 API 调用] --> B2["ncclAlltoAllV<br/>(使用 RMA 实现)"]
-        B2 --> B3["enqueue.cc<br/>rmaCollTaskAppend()"]
-        B3 --> B4["创建 ncclTaskRmaColl<br/>包含多个 RMA 操作"]
-        
-        B4 --> B5["planner.collRmaTaskQueue<br/>RMA Collective 任务队列"]
-        
-        B5 --> B6["scheduleRmaCollTasksToPlan()<br/>rma_coll.cc<br/>(目前为空实现)"]
-        
-        B6 --> B7["处理 ncclTaskRmaColl<br/>可能拆分成多个批次"]
-        B7 --> B8{"任务数量检查<br/>是否超过批次限制"}
-        
-        B8 -->|需要拆分| B9["创建多个 ncclRmaWorkBatch<br/>每个 batch 包含部分操作"]
-        B8 -->|不需要拆分| B10["创建单个 ncclRmaWorkBatch"]
-        
-        B9 --> B11["plan.rmaWorkBatchQueue<br/>工作批次队列"]
-        B10 --> B11
-        
-        B11 --> B12["遍历每个 rmaWorkBatch"]
-        B12 --> B13["对 batch 内的任务分类"]
-        
-        B13 --> B14{"判断操作类型和路径"}
-        B14 -->|Put/Signal + Proxy| B15["batch.proxyPutQueue"]
-        B14 -->|Put/Signal + CE| B16["batch.cePutQueue"]
-        B14 -->|WaitSignal + Proxy| B17["batch.proxyWaitSignalQueue"]
-        B14 -->|WaitSignal + CE| B18["batch.ceWaitSignalQueue"]
-        
-        B15 --> B19["batch 内任务分类完成"]
-        B16 --> B19
-        B17 --> B19
-        B18 --> B19
-        
-        B19 --> B20["ncclLaunchRmaColl()<br/>执行 RMA Collective<br/>(目前为空实现)"]
-        
-        B20 --> B21["按批次顺序执行<br/>同一 batch 内并行"]
-        B21 --> B22{"执行批次内队列"}
-        B22 -->|proxyPutQueue| B23["执行 Proxy Put/Signal<br/>并行处理"]
-        B22 -->|cePutQueue| B24["执行 CE Put/Signal<br/>并行处理"]
-        B22 -->|proxyWaitSignalQueue| B25["执行 Proxy WaitSignal<br/>并行处理"]
-        B22 -->|ceWaitSignalQueue| B26["执行 CE WaitSignal<br/>并行处理"]
-        
-        B23 --> B27{"还有批次?"}
-        B24 --> B27
-        B25 --> B27
-        B26 --> B27
-        
-        B27 -->|是| B12
-        B27 -->|否| B28[执行完成]
-    end
-    
-    style B1 fill:#e1f5ff
-    style B5 fill:#fff4e1
-    style B11 fill:#e8f5e9
-    style B15 fill:#ffecb3
-    style B16 fill:#ffecb3
-    style B17 fill:#ffecb3
-    style B18 fill:#ffecb3
-    style B20 fill:#f3e5f5
-    style B28 fill:#c8e6c9
-```
+  subgraph "RMA Collective Task (ncclTaskRmaColl) 调用路径"
+    B1[用户 API 调用] --> B2["ncclAlltoAllV<br/>(RMA 实现)"]
+    B2 --> B3["enqueue.cc<br/>rmaCollTaskAppend()"]
+    B3 --> B4["planner.collRmaTaskQueue<br/>入队一个 ncclTaskRmaColl"]
 
+    B4 --> B5["rma_coll.cc<br/>scheduleRmaCollTasksToPlan()"]
+    B5 --> B6["rmaCollTasksPrepare()<br/>计算 validNodeDeltas / 生成 batches"]
+    B6 --> B7["遍历每个 batch<br/>构造 Phase1/2/3/4 的任务"]
+    B7 --> B8["填充 batch 四类队列<br/>proxyPut / proxyWait / cePut / ceWait"]
+    B8 --> B9["plan.rmaWorkBatchQueue<br/>入队有效 batch"]
+
+    B9 --> B10["ncclLaunchRmaColl()<br/>执行每个 batch"]
+    B10 --> B11["单个 batch 内并行启动四类操作"]
+    B11 -->|proxyPutQueue| B12["ncclRmaPutProxy<br/>(顺序执行该队列)"]
+    B11 -->|proxyWaitSignalQueue| B13["ncclRmaWaitSignalProxy"]
+    B11 -->|cePutQueue| B14["ncclRmaPutCe"]
+    B11 -->|ceWaitSignalQueue| B15["ncclRmaWaitSignalCe"]
+
+    B12 --> B16{"还有 batch?"}
+    B13 --> B16
+    B14 --> B16
+    B15 --> B16
+    B16 -->|是| B10
+    B16 -->|否| B17[执行完成]
+  end
+
+  style B1 fill:#e1f5ff
+  style B9 fill:#e8f5e9
+  style B12 fill:#ffecb3
+  style B13 fill:#ffecb3
+  style B14 fill:#ffecb3
+  style B15 fill:#ffecb3
+  style B10 fill:#f3e5f5
+  style B17 fill:#c8e6c9
+```
 
 ## 5. ref
 ### meta ncclx
@@ -197,7 +183,7 @@ commResult_t ctranAllToAllvIbImpl(){
     waitAllNotifies();
 }
 ```
-综上，假如node0的rank0发node1的rank1，就是直接跨轨走网络，可能跨spine。但是逻辑过程图示大致如下：
+综上，假如node0的rank0发node1的rank1，额，就是直接跨轨走网络，会跨spine。但是逻辑过程图示大致如下：
 ```mermaid
 sequenceDiagram
     participant R0 as Rank 0
@@ -225,3 +211,6 @@ sequenceDiagram
 
 ```
 以上  
+
+## 6. bug log
+- [ ] 2卡机内 为什么会core
