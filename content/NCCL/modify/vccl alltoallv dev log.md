@@ -212,5 +212,14 @@ sequenceDiagram
 ```
 以上  
 
-## 6. bug log
-- [ ] 2卡机内 为什么会core
+## 6. dev log
+- [x] 多机core ✅ 2026-02-05
+* 增加`-x OMPI_MCA_coll=^ucc`解决目前ucc和mpi直接冲突的coredump 
+
+- [x] 4节点随机收错 ✅ 2026-02-06
+怀疑1: batch0 用 half0 写 → batch1 用 half1 写 → batch2 又要用 half0 写。如果 batch2 的 ProxyPut 没等到 batch1 的 CePut 完成（把 half0 的旧数据搬空），就会覆盖。目前的同步只在“同一 batch 内 stream 之间”，不同 batch 之间没有半区级别的依赖，所以 batch2 的 ProxyPut 可能早于 batch1 的 CePut 结束。 改成完全串行：依旧错误❌
+怀疑2: 任何一个rank的stream清空其实没有用 因为他的proxywait/cewait都是在等另一个节点的rank/自己的其他rank 当要proxyPut/cePut的时候并不知道relay的状态（到底是出于机间已经全搬进来了还是机内全部已经搬走了的状态）增加类似deepep notify内nvshemem_sync_all()的barrier可以暂时解决这个问题
+
+- [x] 1. barrier用（环境变量）控制 2.并增加relabuffer自定义个数（环境变量）来控制多节点数据出错的问题 3. 把count从python侧算完后传下来 4. 修复一些小的偏移问题 5. 修复ucc/mpi冲突的问题 ✅ 2026-02-06
+
+- [ ] 在使用relay的rank上多下一个proxyput告诉下一个sender 我现在relay的数据消费完毕 下一个sender的proxyWait等到后再下数据的proxyPut。这里多出来的proxyPut/proxyWait放在另一个ctx内 来让这个时间藏在RMDA里

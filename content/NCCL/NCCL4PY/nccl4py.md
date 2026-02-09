@@ -22,11 +22,14 @@ Makefile内的dev分支，可以看到如果需要使用nccl4py需要针对不�
 ```shell
 export CUDA_HOME=/usr/local/cuda
 python setup.py build_ext --inplace
+# 
+cd nccl4py
+pip install -r requirements.txt --no-index --find-links=./third/
 ```
 测试：
 ```shell
-export PYTHONPATH=/workspace/liuda/iw/VCCL/nccl4py/build:$PYTHONPATH
-export LD_LIBRARY_PATH=/workspace/liuda/iw/VCCL/build/lib:$LD_LIBRARY_PATH
+export PYTHONPATH=/inspire/hdd/global_user/huxiaohe-p-huxiaohe/liuda/a2av/nccl4py/build:$PYTHONPATH
+export LD_LIBRARY_PATH=/inspire/hdd/global_user/huxiaohe-p-huxiaohe/liuda/a2av/build/lib:$LD_LIBRARY_PATH
 mpirun -np 4 \
         --allow-run-as-root \
         -x LD_LIBRARY_PATH=/workspace/liuda/iw/VCCL/build/lib:$LD_LIBRARY_PATH \
