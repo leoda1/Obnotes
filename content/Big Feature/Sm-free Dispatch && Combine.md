@@ -8,7 +8,7 @@
 * 完整的无核alltoallv的开发[[vccl alltoallv dev log]]
 * 
 ### d. VCCL Document
-* 简洁明了的对外说明andc [[sm-free alltoallv for moe training]]
+* 简洁明了的对外说明and [[sm-free alltoallv for moe training]]
 
 ## 2. timeline
 - [x] 过一遍当前进度，弄清楚现在的buffer设计：[vccl moe in feishu](https://infrawaves.feishu.cn/wiki/Oi8twqYNLizawSk0LCPcCpQen4b) 🛫 2026-01-14 ✅ 2026-01-15
@@ -24,3 +24,4 @@
     - [x] 每个batch里面的所有CeWait合并成一个，所有的ProxyWait合并成1个 ✅ 2026-01-29
     - [x] 完成self-copy，phase1-4的所有调度 ✅ 2026-01-29
     - [x] delta从0开始 ✅ 2026-01-29
+- [ ] 如何在另一个ctx内增加proxyPut/proxyWait来让relaybuffer不会机间影响机内

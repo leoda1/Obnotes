@@ -22,10 +22,6 @@ tags:
 * rmaCollTaskAppend内直接算`relaybuff`，`sendbuff`, `recvbuff` 的偏移
 * `planner.rmaTaskQueues` 是一个数组，大小为 numRmaCtx。不同context的任务可以并行，且互不干扰，同一context任务批处理。我需要对应创建为 `collRmaTaskQueue` 数组吗？？？多个ctx，每个ctx内4个具体任务que，竖着按que取任务来做batch。不需要，我直接就一个queue就行，不弄ctx，因为在调度或者执行阶段还可以从这个里面拆出来去决定走哪个stream or ctx。
 * 遍历顺序：参考 [[init.cc#ncclP2pSchedule|p2pschedule逻辑]] 
-### pseudocode
-综上，伪代码的核心逻辑如下：
-
-
 ## 3. schedule
 ### batch = 0
 在batch0内，每个rankR的任务就是我发会机内其他和收机内其他rank的任务（p2pschedule的sendRank/recvRank那套）。rankR会去先执行下一个nodeRound的机间的任务，也就是我这个rank发给下一个节点/收到上一个节点的所有同轨/跨轨任务。如图：
@@ -35,14 +31,13 @@ tags:
 从batch1的任务开始，所有机内的任务都是同轨机间任务的转发。比如下面路径13就是上一个节点内localRank=2的gpu发到我当前节点的localRank=2的gpu，再转发到rank R内。同理，路径6就是rankR给路径3的转发。以上完成接收侧pxn。
 ![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20260122142242854.png)
 ![](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20260121204353219.png)
-### 对称内存地址/偏移怎么使用
-#### ce 机内
-
-
-
-#### proxy 机间
-
-
+### batch间跨进程同步
+在 [https://github.com/sii-research/VCCL/pull/43](https://github.com/sii-research/VCCL/pull/43) 中，我们使用更多的relaybuffer chunk / bootstrapBarrier来确保这个同步不会出现问题，但是前者会吃大量显存/后者会影响性能。
+* 前者方案：按照nNodes-1的数量初始化relaybuffer chunk数量，因为：比如3个node的all2allv，在我们的方案内一个rank需要至少2个对应relaybuffer chunk；同理4节点的就需要3个对应的relaybuffer chunk
+* 后者在一个batch结束后增加一个全局的barrier，类似deepep在notify_dispatch kernel内调用的nvshmem_sync_all()
+我们的解法：
+![[vccl alltoallv dev log 2026-02-11 16.01.18.excalidraw.svg]]
+%%[[vccl alltoallv dev log 2026-02-11 16.01.18.excalidraw.md|🖋 Edit in Excalidraw]]%%
 
 ## 4. summary
 ```mermaid
@@ -212,7 +207,11 @@ sequenceDiagram
 ```
 以上  
 
-## 6. dev log
+## 6. vccl alltoallv tests
+repo address: [git@github.com:leoda1/nccl-tests.git](git@github.com:leoda1/nccl-tests.git)
+
+
+## 7. dev log
 - [x] 多机core ✅ 2026-02-05
 * 增加`-x OMPI_MCA_coll=^ucc`解决目前ucc和mpi直接冲突的coredump 
 
@@ -223,3 +222,19 @@ sequenceDiagram
 - [x] 1. barrier用（环境变量）控制 2.并增加relabuffer自定义个数（环境变量）来控制多节点数据出错的问题 3. 把count从python侧算完后传下来 4. 修复一些小的偏移问题 5. 修复ucc/mpi冲突的问题 ✅ 2026-02-06
 
 - [ ] 在使用relay的rank上多下一个proxyput告诉下一个sender 我现在relay的数据消费完毕 下一个sender的proxyWait等到后再下数据的proxyPut。这里多出来的proxyPut/proxyWait放在另一个ctx内 来让这个时间藏在RMDA里
+- [ ] 当前会出现数据size小的时候跨机出现问题
+==怀疑1：== 多次alltoallv之间的同步可能有问题？
+尝试a. vccl-tests内测试次数 = warmup_iters +  (1 + (iters * agg_iters + datacheck) * `(I+1)` )，通过 `-I 0 -c 1 -n 1 -m 1 -w 0` ，最小减少到2，发现一样数据会错。❌
+尝试b.在CheckData前sleep(1) ❌
+尝试c. 单次小size到达后，进了L2 cache，然后还不可见，强行flush，cudaDeviceFlushGPUDirectRDMAWrites❌
+
+==怀疑2:== 是不是后发先至 不在一个qp里面 因为1024B就是一个报文 signal在另一个报文 signal在数据的报文前到达？
+尝试a. 找到 `NCCL_IB_PCI_RELAXED_ORDERING` 环境变量，默认是2，改成0，强制保证顺序❌
+尝试b. 
+
+==怀疑3:== GIN插件本身连续三次小size数据的proxyPut发送就有问题 ❌
+尝试a. 写个三次proxyPut + 三次proxyWait，每次只发1024B 验证是否会出现数据发错。结论：GIN没问题
+
+==怀疑4:== wait/put在不同stream上导致的？修改ncclLaunchRmaColl的func都在mainStream上，但是依旧报错。❌
+![[vccl alltoallv dev log 2026-02-13 16.52.47.excalidraw.svg]]
+%%[[vccl alltoallv dev log 2026-02-13 16.52.47.excalidraw.md|🖋 Edit in Excalidraw]]%%
