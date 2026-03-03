@@ -207,26 +207,44 @@ sequenceDiagram
 ```
 以上  
 
-## 6. vccl alltoallv tests
+## 6. alltoallv bugfix log
 repo address: [git@github.com:leoda1/nccl-tests.git](git@github.com:leoda1/nccl-tests.git)
-### 6.1 nccl 如何保证hca来搬运的数据是off chip的
+### 6.1 vccl alltoallv机内机间 wrong 的问题
+描述：在7D7F的开发测试过程中，结合各类观察最终确定问题为：假设 2 个 rank，在 vccl-test 内 initData 时，必然存在一个 rank 会更慢，一个 rank 执行的会更快，此时快的 rank 已经开始执行 alltoallv 的 proxyPut 或者 cePut，慢的 rank 正在 initData(==cudaMemSet(args->recvbuff==))，所以就会导致已经发过去的数据被 cudaMemSet 为 0。所以我们需要一个高效的barrier 来确保，我们的 alltoallv 能够让所有 gpu 同时开始，避免有的先开始导致的 wrong 问题。
+#### 参考：
+* [[ceAlltoall的完整实现：#step2 ncclMemOpSync(comm, stream) | ceAlltoall的 ncclMemOpSync 全局同步方案]]
+* allreduce
+#### 设计方案：
+![[vccl alltoallv dev log 2026-03-02 14.33.11.excalidraw.svg]]
+%%[[vccl alltoallv dev log 2026-03-02 14.33.11.excalidraw.md|🖋 Edit in Excalidraw]]%%
+1) 机内barrier 设计
+下面两个步骤 foor loop localRanks 次；
+发送阶段：每个 rank 把 `ceCtx->signalOpSeqs[peerRank]++;`写入到目标 rank 的 `signalsDev[myRank]`
+接受阶段：在 stream 上插入一个waitValue，等我的 `signalsDev[peer] + 1`
 
+2) 机间 barrier 设计
+机间 peer 集合按 `node!=comm->node` 情况下找完 `peer = comm->nodeRanks[node].localRankToRank[comm->rank]`。拿到所有需要机间同轨rank。对每个 peer 生成一个 desc（里面 size 是 0，op 是 ADD，val 是 1，handle 就是注册 mr提前生成好的）。
+* stream 上放的操作：按照已有的 peer 集合，在 stream 上写 readySeq 并等待 doneSeq。
+* cpu proxy 的操作：出现readSeq 就去rmaProxyCtx->pendingQueues 消费一个 desc。
 
+2) ctx，stream，atomic
+==ctx没有影响，因为==
+机内：在 ncclRmaCeInit 内自己分配了 ceCtx->signalOpSeqs/signalsHost
+机间：在 ncclRmaProxyCreateContext 内自己分配了 proxyCtx->opSeqs/signalsHost
+==stream 则设为 mainStream（ce）+opStream（proxy）==
+这里需要 barrier 任务进来的时候分到 4 条流，并对外和对内能够正确建立依赖、。
+
+==atomic==
+无影响，现在的__atomic_store_n是在给 desc 入队到pendingQueues用的，无所谓。。只要我们写正确 atomic_store，读的时候正确 load
 ## 7. dev log
-- [x] 多机core ✅ 2026-02-05
+- [x] A. 多机core ✅ 2026-02-05
 * 增加`-x OMPI_MCA_coll=^ucc`解决目前ucc和mpi直接冲突的coredump 
----
-
-- [x] 4节点随机收错 ✅ 2026-02-06
+- [x] B. 4节点随机收错 ✅ 2026-02-06
 怀疑1: batch0 用 half0 写 → batch1 用 half1 写 → batch2 又要用 half0 写。如果 batch2 的 ProxyPut 没等到 batch1 的 CePut 完成（把 half0 的旧数据搬空），就会覆盖。目前的同步只在“同一 batch 内 stream 之间”，不同 batch 之间没有半区级别的依赖，所以 batch2 的 ProxyPut 可能早于 batch1 的 CePut 结束。 改成完全串行：依旧错误❌
 怀疑2: 任何一个rank的stream清空其实没有用 因为他的proxywait/cewait都是在等另一个节点的rank/自己的其他rank 当要proxyPut/cePut的时候并不知道relay的状态（到底是出于机间已经全搬进来了还是机内全部已经搬走了的状态）增加类似deepep notify内nvshemem_sync_all()的barrier可以暂时解决这个问题
-
----
-- [x] 1. barrier用（环境变量）控制 2.并增加relabuffer自定义个数（环境变量）来控制多节点数据出错的问题 3. 把count从python侧算完后传下来 4. 修复一些小的偏移问题 5. 修复ucc/mpi冲突的问题 ✅ 2026-02-06
----
-- [ ] 在使用relay的rank上多下一个proxyput告诉下一个sender 我现在relay的数据消费完毕 下一个sender的proxyWait等到后再下数据的proxyPut。这里多出来的proxyPut/proxyWait放在另一个ctx内 来让这个时间藏在RMDA里
----
-- [ ] 当前会出现数据size小的时候跨机出现问题
+- [x] C. barrier用（环境变量）控制 2.并增加relabuffer自定义个数（环境变量）来控制多节点数据出错的问题 3. 把count从python侧算完后传下来 4. 修复一些小的偏移问题 5. 修复ucc/mpi冲突的问题 ✅ 2026-02-06
+- [ ] 4. 在使用relay的rank上多下一个proxyput告诉下一个sender 我现在relay的数据消费完毕 下一个sender的proxyWait等到后再下数据的proxyPut。这里多出来的proxyPut/proxyWait放在另一个ctx内 来让这个时间藏在RMDA里
+- [x] D. 当前会出现数据size小的时候跨机出现问题 ✅ 2026-02-27
 ==怀疑1：== 多次alltoallv之间的同步可能有问题？
 尝试a. vccl-tests内测试次数 = warmup_iters +  (1 + (iters * agg_iters + datacheck) * `(I+1)` )，通过 `-I 0 -c 1 -n 1 -m 1 -w 0` ，最小减少到2，发现一样数据会错。❌
 尝试b.在CheckData前sleep(1) ❌
@@ -245,22 +263,31 @@ repo address: [git@github.com:leoda1/nccl-tests.git](git@github.com:leoda1/nccl-
 
 ==怀疑6：==
 initData的时候sendbuff数据被kernel放到L2 Cached内，而iput是dma操作，在HBM内直接读已经找不到数据了。
-workaround✅：在vccl-test侧加上一个cudaMemset可以让每个gpu的L2 cache的数据被自定义的值占用，让sendbuff真正回到HBM内。
+**workaround**：在vccl-test侧加上一个cudaMemset/或者l2EvictKernel，可以让每个gpu的L2 cache的数据被自定义的值占用，让sendbuff真正回到HBM内。✅
 ```cpp
-for (int c = 0; c < datacheck; c++) {
-    // Initialize sendbuffs, recvbuffs and expected
-    TESTCHECK(args->collTest->initData(args, type, op, root, rep, in_place));
-    for (int i = 0; i < args->nGpus; i++) {
-        CUDACHECK(cudaSetDevice(args->gpus[i]));
-        void* flushBuf = nullptr;
-        CUDACHECK(cudaMalloc(&flushBuf, 128ULL * 1024 * 1024));
-        CUDACHECK(cudaMemset(flushBuf, 0xAB, 128ULL * 1024 * 1024));
-        CUDACHECK(cudaDeviceSynchronize());
-        CUDACHECK(cudaFree(flushBuf));
-    }
+static __global__ void l2EvictKernel(char* buf, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (; i < n; i += stride) buf[i] = 0;
+}
+
+for (int i = 0; i < args->nGpus; i++) {
+    CUDACHECK(cudaSetDevice(args->gpus[i]));
+    void* flushBuf = nullptr;
+    size_t flushSize = 128ULL * 1024 * 1024;
+    CUDACHECK(cudaMalloc(&flushBuf, flushSize));
+    l2EvictKernel<<<1024, 256>>>((char*)flushBuf, flushSize);
+    CUDACHECK(cudaDeviceSynchronize());
+    CUDACHECK(cudaFree(flushBuf));
 }
 ```
+- [x] E. CudaMemoryWrapper里面的__cuda_array_interface__估计找不到bf16的类型 然后as_tensor自己回退分配了一块别的 ✅ 2026-02-26
+- [ ] F. 对齐 ceAlltoall 的实现，解决alltoallv机内出现 wrong 的问题
+==NSYS 观察到：==
+stream 上的执行的东西不一致。
+![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20260227205316341.png)
 
-
----
-- [x] CudaMemoryWrapper里面的__cuda_array_interface__估计找不到bf16的类型 然后as_tensor自己回退分配了一块别的 ✅ 2026-02-26
+NCCL API：ncclCommCount，ncclCommUserRank
+![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20260227205522569.png)
+CUDA API：
+![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20260227205802191.png)
