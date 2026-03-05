@@ -24,5 +24,5 @@
     - [x] 每个batch里面的所有CeWait合并成一个，所有的ProxyWait合并成1个 ✅ 2026-01-29
     - [x] 完成self-copy，phase1-4的所有调度 ✅ 2026-01-29
     - [x] delta从0开始 ✅ 2026-01-29
+- [x] 在 alltoallv 的开始增加一个 barrier 来确保 coll 算法不会出现 wrong ✅ 2026-03-04
 - [ ] 如何在另一个ctx内增加proxyPut/proxyWait来让relaybuffer不会机间影响机内
-- [ ] 在 alltoallv 的开始增加一个 barrier 来确保 coll 算法不会出现 wrong

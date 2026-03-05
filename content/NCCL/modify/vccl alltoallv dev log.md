@@ -32,12 +32,29 @@ tags:
 ![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20260122142242854.png)
 ![](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20260121204353219.png)
 ### batch间跨进程同步
+#### 前言：
 在 [https://github.com/sii-research/VCCL/pull/43](https://github.com/sii-research/VCCL/pull/43) 中，我们使用更多的relaybuffer chunk / bootstrapBarrier来确保这个同步不会出现问题，但是前者会吃大量显存/后者会影响性能。
 * 前者方案：按照nNodes-1的数量初始化relaybuffer chunk数量，因为：比如3个node的all2allv，在我们的方案内一个rank需要至少2个对应relaybuffer chunk；同理4节点的就需要3个对应的relaybuffer chunk
 * 后者在一个batch结束后增加一个全局的barrier，类似deepep在notify_dispatch kernel内调用的nvshmem_sync_all()
-我们的解法：
+我们都是接收侧的 pxn，所以在 batch2 的任务执行的时候，它并不知道 bach0 的 S1->D 的数据在 relay0 上有没有被机内搬走。
 ![[vccl alltoallv dev log 2026-02-11 16.01.18.excalidraw.svg]]
 %%[[vccl alltoallv dev log 2026-02-11 16.01.18.excalidraw.md|🖋 Edit in Excalidraw]]%%
+
+#### 核心问题：
+怎么让 relay0 完成 relay0->D之后 putSignal 给到 batch2 的 sender(S3)，S3 等到这个 Signal 后再下数据过来。
+~~==解法 1：== 开三个 relay的话batch3的 proxyPut 操作在sendBuffer->R0的时候，R0 的数据极大概率全部搬运完了。~~方案被 PASS
+![[vccl alltoallv dev log 2026-03-04 16.58.07.excalidraw.svg]]
+%%[[vccl alltoallv dev log 2026-03-04 16.58.07.excalidraw.md|🖋 Edit in Excalidraw]]%%
+
+==解法 2：== 方案就集齐所有优点，相应的复杂度最高。前置条件依旧是双 relaybuffer 切换，relay0 长度为假设 S1 所有数据都是给 (D+E+F....)，整个长度为 `2 * sizeof(sendbuff * (nLoaclRanks - 1))`。需要核心考虑的几个问题：
+* 现在的调度逻辑scheduleRmaCollTasksToPlan增加下面proxyPut/proxyWait操作(这两类任务是在不同进程的同batch)
+* 考虑barrier更细粒度的拆分出来放到batch内，因为从profiling结果来看机内的同步barrier同步可能更快，所以机内。 
+* 
+![[vccl alltoallv dev log 2026-03-04 17.51.40.excalidraw.svg]]
+%%[[vccl alltoallv dev log 2026-03-04 17.51.40.excalidraw.md|🖋 Edit in Excalidraw]]%%
+
+==解法 3：==
+
 
 ## 4. summary
 ```mermaid
@@ -243,7 +260,6 @@ repo address: [git@github.com:leoda1/nccl-tests.git](git@github.com:leoda1/nccl-
 怀疑1: batch0 用 half0 写 → batch1 用 half1 写 → batch2 又要用 half0 写。如果 batch2 的 ProxyPut 没等到 batch1 的 CePut 完成（把 half0 的旧数据搬空），就会覆盖。目前的同步只在“同一 batch 内 stream 之间”，不同 batch 之间没有半区级别的依赖，所以 batch2 的 ProxyPut 可能早于 batch1 的 CePut 结束。 改成完全串行：依旧错误❌
 怀疑2: 任何一个rank的stream清空其实没有用 因为他的proxywait/cewait都是在等另一个节点的rank/自己的其他rank 当要proxyPut/cePut的时候并不知道relay的状态（到底是出于机间已经全搬进来了还是机内全部已经搬走了的状态）增加类似deepep notify内nvshemem_sync_all()的barrier可以暂时解决这个问题
 - [x] C. barrier用（环境变量）控制 2.并增加relabuffer自定义个数（环境变量）来控制多节点数据出错的问题 3. 把count从python侧算完后传下来 4. 修复一些小的偏移问题 5. 修复ucc/mpi冲突的问题 ✅ 2026-02-06
-- [ ] 4. 在使用relay的rank上多下一个proxyput告诉下一个sender 我现在relay的数据消费完毕 下一个sender的proxyWait等到后再下数据的proxyPut。这里多出来的proxyPut/proxyWait放在另一个ctx内 来让这个时间藏在RMDA里
 - [x] D. 当前会出现数据size小的时候跨机出现问题 ✅ 2026-02-27
 ==怀疑1：== 多次alltoallv之间的同步可能有问题？
 尝试a. vccl-tests内测试次数 = warmup_iters +  (1 + (iters * agg_iters + datacheck) * `(I+1)` )，通过 `-I 0 -c 1 -n 1 -m 1 -w 0` ，最小减少到2，发现一样数据会错。❌
@@ -282,7 +298,7 @@ for (int i = 0; i < args->nGpus; i++) {
 }
 ```
 - [x] E. CudaMemoryWrapper里面的__cuda_array_interface__估计找不到bf16的类型 然后as_tensor自己回退分配了一块别的 ✅ 2026-02-26
-- [ ] F. 对齐 ceAlltoall 的实现，解决alltoallv机内出现 wrong 的问题
+- [x] F. 对齐 ceAlltoall 的实现，解决alltoallv机内出现 wrong 的问题 ✅ 2026-03-04
 ==NSYS 观察到：==
 stream 上的执行的东西不一致。
 ![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20260227205316341.png)
@@ -290,4 +306,8 @@ stream 上的执行的东西不一致。
 NCCL API：ncclCommCount，ncclCommUserRank
 ![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20260227205522569.png)
 CUDA API：
-![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20260227205802191.png)
+![image.png|946](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20260227205802191.png)
+代码：在对所有 wrong 的元素 1024B 全部 dump 出来看，结论就是 recvbuffer 不存在同时被cudaMemcpyAsync和cudaMemSet 使用，是因为先后顺序的问题，先拷贝完又被cudaMemSet清理掉。最终 pr: [https://github.com/sii-research/VCCL/pull/46](https://github.com/sii-research/VCCL/pull/46)
+- [ ] G. 追踪VCCL（NCCL 2.29-based）在单机上AlltoAll和AllGather性能均大幅劣化(30+GB/s)的原因
+- [x] H. 增加 debug log 区分 NCCL 和 VCCL，最终 pr: [https://github.com/sii-research/VCCL/pull/47](https://github.com/sii-research/VCCL/pull/47) ✅ 2026-03-04
+- [ ] I. 在使用relay的rank上多下一个proxyput告诉下一个sender 我现在relay的数据消费完毕 下一个sender的proxyWait等到后再下数据的proxyPut。这里多出来的proxyPut/proxyWait放在另一个ctx内 来让这个时间藏在RMDA里，具体方案见：[[vccl alltoallv dev log#batch间跨进程同步 | batch间跨进程同步]]。
