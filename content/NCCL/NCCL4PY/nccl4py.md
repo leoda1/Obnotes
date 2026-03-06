@@ -17,16 +17,27 @@ GPU 通信执行
 ```
 **从 Python 调用开始，经过 Python 包装 → Cython 绑定 → 动态库加载 → NCCL C 库，最终在 GPU 上执行通信操作。**
 ### 1.2 compile and test
-Makefile内的dev分支，可以看到如果需要使用nccl4py需要针对不同的cuda版本下载一些依赖，所以直接手动pip install了一些小依赖，比如  `cuda.core` 等。
-然后nccl4py路径下直接编译：
+* step1. VCCL/nccl4py路径下直接编译(==主 node 执行==就可以完成 nccl4py的编译)：
 ```shell
 export CUDA_HOME=/usr/local/cuda
 python setup.py build_ext --inplace
-# 
+```
+* step2. 手动pip download了nccl4py需要的 python 依赖，比如  `cuda.core` 等来应对集群没有网的 case。主要包括一下四个：
+![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20260306135427704.png)
+写一个 `requirements.txt` 一键 pip install 这些 whl 轮子。
+```
+# requirements.txt
+packaging==24.2
+mpi4py
+cuda.core
+```
+安装（==每个 node 上执行==）：
+```
 cd nccl4py
 pip install -r requirements.txt --no-index --find-links=./third/
 ```
-测试：
+
+* step3. 完成安装后直接就可以使用 vccl alltoallv 简单测试`03_alltoallv.py`的功能：
 ```shell
 export PYTHONPATH=/inspire/hdd/global_user/huxiaohe-p-huxiaohe/liuda/a2av/nccl4py/build:$PYTHONPATH
 export LD_LIBRARY_PATH=/inspire/hdd/global_user/huxiaohe-p-huxiaohe/liuda/a2av/build/lib:$LD_LIBRARY_PATH

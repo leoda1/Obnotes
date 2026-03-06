@@ -15,7 +15,7 @@ def should_free_input(name, is_moe, config):
     // ...
 ```
 以上为我在2025.10.14在 Megatron-LM 提的 issue : [https://github.com/issues/created?issue=NVIDIA%7CMegatron-LM%7C1862](https://github.com/issues/created?issue=NVIDIA%7CMegatron-LM%7C1862)
-### 
-
 
 ## Vccl a2av moe overlap training
+### 1. 使用 vccl alltoallv
+* step1. 首先需要参考：[[nccl4py#1.2 compile and test|alltoallv安装指南]]，完成安装。

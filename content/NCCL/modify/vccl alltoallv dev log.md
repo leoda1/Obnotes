@@ -48,8 +48,7 @@ tags:
 
 ==解法 2：== 方案就集齐所有优点，相应的复杂度最高。前置条件依旧是双 relaybuffer 切换，relay0 长度为假设 S1 所有数据都是给 (D+E+F....)，整个长度为 `2 * sizeof(sendbuff * (nLoaclRanks - 1))`。需要核心考虑的几个问题：
 * 现在的调度逻辑scheduleRmaCollTasksToPlan增加下面proxyPut/proxyWait操作(这两类任务是在不同进程的同batch)
-* 考虑barrier更细粒度的拆分出来放到batch内，因为从profiling结果来看机内的同步barrier同步可能更快，所以机内。 
-* 
+* 考虑barrier更细粒度的拆分出来放到batch内，因为从profiling结果来看，机间的 barrier 随着节点数大于 8 之后会比机内的 barrier 慢，所以不采用全部机间同轨 barrier。这里我们针对每个 batch 的机间任务只包含 3 个 node来进一步拆分，将所有的机间同轨 barrier 任务散落到不同 rank 的不同 batch 内。
 ![[vccl alltoallv dev log 2026-03-04 17.51.40.excalidraw.svg]]
 %%[[vccl alltoallv dev log 2026-03-04 17.51.40.excalidraw.md|🖋 Edit in Excalidraw]]%%
 
