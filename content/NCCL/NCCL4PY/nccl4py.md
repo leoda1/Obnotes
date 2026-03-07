@@ -36,7 +36,6 @@ cuda.core
 cd nccl4py
 pip install -r requirements.txt --no-index --find-links=./third/
 ```
-
 * step3. 完成安装后直接就可以使用 vccl alltoallv 简单测试`03_alltoallv.py`的功能：
 ```shell
 export PYTHONPATH=/inspire/hdd/global_user/huxiaohe-p-huxiaohe/liuda/a2av/nccl4py/build:$PYTHONPATH
