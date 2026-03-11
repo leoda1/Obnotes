@@ -804,9 +804,6 @@ rank按照行的方式完成8个位置的atomic加，thread按照列的方式去
 
 在 `nvshmemi_ibgda_amo_nonfetch_impl`内对QP同样增加容错后，实践发现可以正常完成 `nvshmem_sync_all()`操作并退出。观察到对应代码行前后的trace数量一致。该hang解决。
 
-
-
-
 # 5. time-line
 - [x] Fixing NVSHMEM memory issue ✅ 2025-12-03
 - [x] 修改后的DeepEP python能链接到修改后的deepep和nvshmem的c++代码。 ✅ 2025-11-28

@@ -54,7 +54,6 @@ tags:
 
 ==解法 3：==
 
-
 ## 4. summary
 ```mermaid
 graph TB
@@ -276,8 +275,7 @@ repo address: [git@github.com:leoda1/nccl-tests.git](git@github.com:leoda1/nccl-
 
 ==怀疑5:== iputSignal实现有问题，修改为iput+signal。❌
 
-==怀疑6：==
-initData的时候sendbuff数据被kernel放到L2 Cached内，而iput是dma操作，在HBM内直接读已经找不到数据了。
+==怀疑6：==initData的时候sendbuff数据被kernel放到L2 Cached内，而iput是dma操作，在HBM内直接读已经找不到数据了。
 **workaround**：在vccl-test侧加上一个cudaMemset/或者l2EvictKernel，可以让每个gpu的L2 cache的数据被自定义的值占用，让sendbuff真正回到HBM内。✅
 ```cpp
 static __global__ void l2EvictKernel(char* buf, size_t n) {
@@ -307,6 +305,12 @@ NCCL API：ncclCommCount，ncclCommUserRank
 CUDA API：
 ![image.png|946](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20260227205802191.png)
 代码：在对所有 wrong 的元素 1024B 全部 dump 出来看，结论就是 recvbuffer 不存在同时被cudaMemcpyAsync和cudaMemSet 使用，是因为先后顺序的问题，先拷贝完又被cudaMemSet清理掉。最终 pr: [https://github.com/sii-research/VCCL/pull/46](https://github.com/sii-research/VCCL/pull/46)
-- [ ] G. 追踪VCCL（NCCL 2.29-based）在单机上AlltoAll和AllGather性能均大幅劣化(30+GB/s)的原因
+- [x] G. 追踪VCCL（NCCL 2.29-based）在单机上AlltoAll和AllGather性能均大幅劣化(30+GB/s)的原因 ✅ 2026-03-09
 - [x] H. 增加 debug log 区分 NCCL 和 VCCL，最终 pr: [https://github.com/sii-research/VCCL/pull/47](https://github.com/sii-research/VCCL/pull/47) ✅ 2026-03-04
-- [ ] I. 在使用relay的rank上多下一个proxyput告诉下一个sender 我现在relay的数据消费完毕 下一个sender的proxyWait等到后再下数据的proxyPut。这里多出来的proxyPut/proxyWait放在另一个ctx内 来让这个时间藏在RMDA里，具体方案见：[[vccl alltoallv dev log#batch间跨进程同步 | batch间跨进程同步]]。
+- [x] I. 在使用relay的rank上多下一个proxyput告诉下一个sender 我现在relay的数据消费完毕 下一个sender的proxyWait等到后再下数据的proxyPut。这里多出来的proxyPut/proxyWait放在另一个ctx内 来让这个时间藏在RMDA里，具体方案见：[[vccl alltoallv dev log#batch间跨进程同步 | batch间跨进程同步]]。 ✅ 2026-03-09
+- [ ] 解决max_connections=32 的 bug 📅 2026-03-09
+前言：
+解法 1：在 rma_coll内变更当前逻辑为 barrier->alltoallv->barrier，但是依旧相同报错
+解法 2：目前应该是kernel /copy 在硬件上存在 workqueue，当并发高的时候可能kernel 上排队的任务比 copy 上排队的任务多之后，导致的 copy 失败。`CUDA_DEVICE_MAX_COPY_CONNECTIONS`研究
+
+workaround：目前来看 max_connections是 1 或者 2 的时候都是正常的。

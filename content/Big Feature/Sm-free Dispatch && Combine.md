@@ -7,7 +7,6 @@
 * 涉及内存alloc和vccl alltoallv的c++接口怎么直接给上层使用 [[nccl4py]]
 ### c. VCCL
 * 完整的无核alltoallv的开发[[vccl alltoallv dev log]]
-* 
 ### d. VCCL Document
 * 简洁明了的对外说明and [[vccl alltoallv for moe training]]
 

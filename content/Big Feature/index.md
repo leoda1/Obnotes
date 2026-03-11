@@ -1,3 +1,0 @@
-- [ ] DeeEP Fault Tolerance优化
-- [ ] VCCL Alltoallv长线同步方案、及开发
-- [ ] gpu hang的case下如何打印机内p2p重要信息出来
