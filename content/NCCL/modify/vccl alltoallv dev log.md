@@ -310,7 +310,7 @@ CUDA API：
 - [x] I. 在使用relay的rank上多下一个proxyput告诉下一个sender 我现在relay的数据消费完毕 下一个sender的proxyWait等到后再下数据的proxyPut。这里多出来的proxyPut/proxyWait放在另一个ctx内 来让这个时间藏在RMDA里，具体方案见：[[vccl alltoallv dev log#batch间跨进程同步 | batch间跨进程同步]]。 ✅ 2026-03-09
 - [ ] 解决max_connections=32 的 bug 📅 2026-03-09
 前言：
-解法 1：在 rma_coll内变更当前逻辑为 barrier->alltoallv->barrier，但是依旧相同报错
-解法 2：目前应该是kernel /copy 在硬件上存在 workqueue，当并发高的时候可能kernel 上排队的任务比 copy 上排队的任务多之后，导致的 copy 失败。`CUDA_DEVICE_MAX_COPY_CONNECTIONS`研究
+解法 1：在 rma_coll内变更当前逻辑为 barrier->alltoallv->barrier，但是依旧相同报错 ❌
+解法 2：目前应该是kernel /copy 在硬件上存在 workqueue，当并发高的时候可能kernel 上排队的任务比 copy 上排队的任务多之后，导致的 copy 失败？？？。`CUDA_DEVICE_MAX_COPY_CONNECTIONS`开 32 就可以跑 会出现机内的cudaMemcpyAsync的并行吗（不行）
 
-workaround：目前来看 max_connections是 1 或者 2 的时候都是正常的。
+workaround：目前来看 `CUDA_DEVICE_MAX_CONNECTIONS` 是 1 或者 2 的时候都是正常的。开 2 会出现机内和机间的并行吗（待验证）
