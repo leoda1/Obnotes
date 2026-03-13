@@ -10,23 +10,19 @@ nixl 内需要提供什么？ [[2. nixl flagcx backend design]]，nixl 侧需要
 3. flagcxReqH: public nixlBackendReqH
 4. flagcx_plugin.cpp
 ### flagcx侧
-flagcx 侧薄封装一层 flagcx_nixl_engine.cc\flagcx_nixl_engine.h，来让 nixl 只依赖一个很小的头文件也不是跟 flagcx 内部的 comm.h,adaptor.h都混在一起。
+flagcx 封装一层 engine.cc\engine.h，来让 nixl 只依赖一个很小的头文件也不是跟 flagcx 内部的 comm.h,adaptor.h都混在一起。
+但是改动这边比较大[[3. One side flagcx nixl engine design]]：（待定）
 
-但是改动这边比较大[[3. flagcx nixl engine design]]：
-* flagcx_nixl_engine.h/.cc
-* flagcx_nixl_control_plane，如果是双边的话就得连接握手、接收 READ/WRITE 请求、完成通知、错误回传
-* flagcx_nixl_conn，如果是双边就得用这个保存每个 peer 的连接、能力、transport 类型、通知通道、请求状态
-* flagcx_nixl_mr / remote_md，用来区分本地注册后的状态/远端的导入后的 meta_data
-* flagcx_nixl_req / progress，post/check xfer 的异步推进/轮询
-* one-sided handle export/import，NIXL_READ走单边，得重构flagcxOneSideRegister来适配 nixl 的 pairwise 模型
-* NIXL_READ 的 native-get，看后续 flagcx 情况。
+讨论后，确定第一版先考虑 NIXL 内支持双边的 Flagcx backend。[[4. Two-side flagcx nixl engine design]]
 * https://jwolpxeehx.feishu.cn/file/B74lbmjHHoPHesx1znuc0iOanGe
 
-![[flagcx support nixl backend 2026-03-11 20.24.22.excalidraw.svg]]
-%%[[flagcx support nixl backend 2026-03-11 20.24.22.excalidraw.md|🖋 Edit in Excalidraw]]%%
+## Phase 0/1 区别
 
-time log：
-- [ ] 确定一些未知问题
-* p2p.cc 里传输不是一个“拿来即用的 memcpy helper”，它绑在 proxy/transportResources/flagcxProxyArgs，复用成本过高。。。
-* 本地 registerMem -> flagcx_nixl_reg_mem -> flagcx_nixl_export_mem；远端 loadRemoteMD -> flagcx_nixl_import_mem。same-host 最多在 import 时打开一次 IPC 映射，cross-host 只保存 mem_token/base/len。如果上层每次推理都新分配临时 buffer，那会有重复注册，但那是上层生命周期问题，不是 southbound 必须 per-peer 临时注册。
-* flagcx_nixl_reg_mem 返回的是“本进程私有 handle”，不能直接跨 agent 用；==而 NIXL 跨 agent 传的就是 blob==。export_mem 负责把可共享部分序列化出去，import_mem 负责在消费端变成 remote_mem 对象。same-host 时它会把 IPC handle 打开成 ipc_mapped_ptr；cross-host 时它只保留 token/range，供后续 control/data plane 用。
+| 维度             | Phase 0（双边 postXfer）       | Phase 1（单边 + 控制面）                   |
+| -------------- | -------------------------- | ----------------------------------- |
+| FlagCX 侧需实现的代码 | connect/send/recv/poll     | 完整控制面 + progress thread + 状态机       |
+| 控制通道           | 不需要                        | 必须实现                                |
+| 线程             | 无额外线程                      | progress thread + 可能的 accept thread |
+| NIXL 侧改动       | 上层协调两端各自 postXfer          | 不改                                  |
+| 通知支持           | 初期 `supportsNotif()=false` | 需控制通道                               |
+| 匹配正确性          | 依赖 FIFO 顺序（flagcx 语义保证）    | 由 req_id + mem_token 显式匹配           |
