@@ -3,3 +3,4 @@
 ```
 grep -A1 '"token"' ~/.openclaw/openclaw.json
 ```
+

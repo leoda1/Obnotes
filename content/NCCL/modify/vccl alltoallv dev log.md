@@ -6,6 +6,7 @@ tags:
 状态: doing
 ---
 ## 1. struct
+https://github.com/
 ![[1d45e817-ba03-4cbb-a871-3e1bac980564.png]]
 
 ## 2. rmaCollTaskAppend
@@ -22,6 +23,7 @@ tags:
 * rmaCollTaskAppend内直接算`relaybuff`，`sendbuff`, `recvbuff` 的偏移
 * `planner.rmaTaskQueues` 是一个数组，大小为 numRmaCtx。不同context的任务可以并行，且互不干扰，同一context任务批处理。我需要对应创建为 `collRmaTaskQueue` 数组吗？？？多个ctx，每个ctx内4个具体任务que，竖着按que取任务来做batch。不需要，我直接就一个queue就行，不弄ctx，因为在调度或者执行阶段还可以从这个里面拆出来去决定走哪个stream or ctx。
 * 遍历顺序：参考 [[init.cc#ncclP2pSchedule|p2pschedule逻辑]] 
+---
 ## 3. schedule
 ### batch = 0
 在batch0内，每个rankR的任务就是我发会机内其他和收机内其他rank的任务（p2pschedule的sendRank/recvRank那套）。rankR会去先执行下一个nodeRound的机间的任务，也就是我这个rank发给下一个节点/收到上一个节点的所有同轨/跨轨任务。如图：

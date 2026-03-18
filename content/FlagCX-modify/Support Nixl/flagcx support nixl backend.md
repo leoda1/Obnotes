@@ -19,7 +19,7 @@ flagcx 封装一层 engine.cc\engine.h，来让 nixl 只依赖一个很小的头
 ===3.13第二次讨论后== ，明确了三件事情
 * 现在 nixl 使用的是 read_block(就是 rdma_read)跑通的 deepseek v3.2 pd 分离。
 * kimi 的 mooncake transfer engine 是走的 put，但是它跑不通v3.2。
-* 短期先去追最核心的问题：为什么原来 vllm 内 nccl connector 跑不通 v3.2 ？解决不了的话就去研究如何实现 get，在 nixl 侧对接 flagcx 的 rdma_read，实现 vllm 内 deepseek v3.2 pd 分离可以使用 flagcx 跑通。[[vllm 推理 v3.2 pd 分离bug]]
+* 短期先去追最核心的问题：为什么原来 vllm 内 nccl connector 跑不通 v3.2 ？解决不了的话就去研究如何实现 get，在 nixl 侧对接 flagcx 的 rdma_read，实现 vllm 内 deepseek v3.2 pd 分离可以使用 flagcx 跑通。[[1. Bugfix for vllm deepseek v3.2 1p1d]]
 ## Phase 0/1 区别
 
 | 维度             | Phase 0（双边 postXfer）       | Phase 1（单边 + 控制面）                   |
