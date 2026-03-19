@@ -7,6 +7,7 @@
 * 涉及内存alloc和vccl alltoallv的c++接口怎么直接给上层使用 [[nccl4py]]
 ### c. VCCL
 * 完整的无核alltoallv的开发[[vccl alltoallv dev log]]
+* B300 atoallv测试数据 
 ### d. VCCL Document
 * 简洁明了的对外说明and [[vccl alltoallv for moe training]]
 
@@ -26,5 +27,4 @@
     - [x] delta从0开始 ✅ 2026-01-29
 - [x] 在 alltoallv 的开始增加一个 barrier 来确保 coll 算法不会出现 wrong ✅ 2026-03-04
 - [x] 如何在另一个ctx内增加proxyPut/proxyWait来让relaybuffer不会机间影响机内，📅 2026-03-05，讨论后认为复杂度太高，目前优先级降低。 ✅ 2026-03-06      **pending**
-- [ ] 等待 cq 确定 max_connections的 bug 出现在哪一侧 去追这个 bug 跑一下 nccl 最佳 benchmark(max_connections=32)
-- [ ] 
+- [x] 等待 cq 确定 max_connections的 bug 出现在哪一侧 去追这个 bug 跑一下 nccl 最佳 benchmark(max_connections=32) ✅ 2026-03-16

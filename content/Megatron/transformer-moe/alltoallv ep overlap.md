@@ -18,4 +18,4 @@ def should_free_input(name, is_moe, config):
 
 ## Vccl a2av moe overlap training
 ### 1. 使用 vccl alltoallv
-* step1. 首先需要参考：[[nccl4py#1.2 compile and test|alltoallv安装指南]]，完成安装。
+* step1. 首先需要参考：[[nccl4py#1.2 compile and test|nccl4py安装指南]]，完成安装。

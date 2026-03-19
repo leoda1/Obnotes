@@ -3,7 +3,6 @@
 ---
 [https://huggingface.co/spaces/nanotron/ultrascale-playbook?section=one_forward,_one_backward_and_llama_3.1_schemes](https://huggingface.co/spaces/nanotron/ultrascale-playbook?section=one_forward,_one_backward_and_llama_3.1_schemes)
 
-
 ## Pipeline Parallelism(PP)
 
 回顾TP当中，我们将tensor并行性的规模超过一个node上的4或者8个gpu的时候会迫使我们用低带宽lower-bandwidth的网络通讯，简言之走了net（机间的IB，roce等）。
