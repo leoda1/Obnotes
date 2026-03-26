@@ -253,7 +253,10 @@ repo address: [git@github.com:leoda1/nccl-tests.git](git@github.com:leoda1/nccl-
 
 ==atomic==
 无影响，现在的__atomic_store_n是在给 desc 入队到pendingQueues用的，无所谓。。只要我们写正确 atomic_store，读的时候正确 load
-## 7. dev log
+
+# 7. 性能优化
+
+# 8. dev log
 - [x] A. 多机core ✅ 2026-02-05
 * 增加`-x OMPI_MCA_coll=^ucc`解决目前ucc和mpi直接冲突的coredump 
 - [x] B. 4节点随机收错 ✅ 2026-02-06
@@ -310,9 +313,10 @@ CUDA API：
 - [x] G. 追踪VCCL（NCCL 2.29-based）在单机上AlltoAll和AllGather性能均大幅劣化(30+GB/s)的原因 ✅ 2026-03-09
 - [x] H. 增加 debug log 区分 NCCL 和 VCCL，最终 pr: [https://github.com/sii-research/VCCL/pull/47](https://github.com/sii-research/VCCL/pull/47) ✅ 2026-03-04
 - [x] I. 在使用relay的rank上多下一个proxyput告诉下一个sender 我现在relay的数据消费完毕 下一个sender的proxyWait等到后再下数据的proxyPut。这里多出来的proxyPut/proxyWait放在另一个ctx内 来让这个时间藏在RMDA里，具体方案见：[[vccl alltoallv dev log#batch间跨进程同步 | batch间跨进程同步]]。 ✅ 2026-03-09
-- [ ] 解决max_connections=32 的 bug 📅 2026-03-09
+- [x] 解决max_connections=32 的 bug 📅 2026-03-09 ✅ 2026-03-20
 前言：
 解法 1：在 rma_coll内变更当前逻辑为 barrier->alltoallv->barrier，但是依旧相同报错 ❌
 解法 2：目前应该是kernel /copy 在硬件上存在 workqueue，当并发高的时候可能kernel 上排队的任务比 copy 上排队的任务多之后，导致的 copy 失败？？？。`CUDA_DEVICE_MAX_COPY_CONNECTIONS`开 32 就可以跑 会出现机内的cudaMemcpyAsync的并行吗（不行）
 
 workaround：目前来看 `CUDA_DEVICE_MAX_CONNECTIONS` 是 1 或者 2 的时候都是正常的。开 2 会出现机内和机间的并行吗（待验证）
+解法 3：megatron 侧自己创建 stream 就可以解决，因为上层业务侧分下来的 stream 不对。✅

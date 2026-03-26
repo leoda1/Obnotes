@@ -28,3 +28,4 @@
 - [x] 在 alltoallv 的开始增加一个 barrier 来确保 coll 算法不会出现 wrong ✅ 2026-03-04
 - [x] 如何在另一个ctx内增加proxyPut/proxyWait来让relaybuffer不会机间影响机内，📅 2026-03-05，讨论后认为复杂度太高，目前优先级降低。 ✅ 2026-03-06      **pending**
 - [x] 等待 cq 确定 max_connections的 bug 出现在哪一侧 去追这个 bug 跑一下 nccl 最佳 benchmark(max_connections=32) ✅ 2026-03-16
+- [ ] alltoallv 性能优化
