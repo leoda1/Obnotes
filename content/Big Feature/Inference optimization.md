@@ -12,9 +12,8 @@
  - [x] nsys去 profiler mooncake/nixl 32K 输入的 case [[4. vllm mooncake&&nixl connector test#6. profiler | profiler 1P1D]] ✅ 2026-03-31
  - [ ] 学习 mooncake 源码和 vllm 的不同 connector 的 kv cache 调度逻辑，拆分 flagcx connector 开发方案
      - [x] nixl 源码整体实现[[0. nixl research]] ✅ 2026-04-01
-     - [ ] [doing]Mooncake connector实现 [[1. vllm 如何使用 mooncake 传输 kv cache]]
-     - [ ] [doing]Mooncake xfer engine源码学习 [[0. mooncake rdma transfer]]
-     - [ ] [doing]Nccl_connector->flagcx_connector 优化，放在vllm-plugin-fl；Nccl engine->flagcx engine，和mooncake性能对齐；
+     - [ ] flagcx connector实现，放在vllm-plugin-fl；Nccl engine->flagcx engine，和mooncake性能对齐； [[5. flagcx connector design&&dev&&test]]
+     - [ ] Mooncake xfer engine源码学习 [[0. mooncake rdma transfer]]
      - [ ] vllm 如何管理 kv cache，nixl 和 mooncake 的 connector 如何使用 block 索引 kv cache 并指挥底层 rdma
      - [ ] 统计单次 mooncake 传输的时间
  - [ ] glm 模型用 flagos 跑通 [[3. vllm glm5 1P1D 推理]]
