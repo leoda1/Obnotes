@@ -165,3 +165,8 @@ P99 ITL (ms):                            32.01
     - 合起来约 750 tok/s
 
 ## 2. 怎么调优
+
+## tp/dp/pp/ep
+
+![[framework 2026-04-08 21.00.45.excalidraw.svg]]
+%%[[framework 2026-04-08 21.00.45.excalidraw.md|🖋 Edit in Excalidraw]]%%

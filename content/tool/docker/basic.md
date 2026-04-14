@@ -10,13 +10,13 @@ docker run -d -it --network=host --gpus all --privileged --ipc=host --ulimit mem
 docker run -d -it --network=host --gpus all --privileged --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 -v /mnt/nfs/infra:/workspace/infrawaves/ --name cuda129 nvcr.io/nvidia/pytorch:25.06-py3
 ```
 
-实例变成images：
+**实例变成images：**
 
 ```bash
 docker commit a1b2c3d4e5f6 my_custom_cuda129_image
 ```
 
-保存images:
+**保存images:**
 
 ```bash
 docker save -o my_custom_cuda129_image.tar my_custom_cuda129_image
@@ -118,3 +118,9 @@ RUN echo '/etc/init.d/ssh restart' >> /root/.bashrc
 # 恢复工作目录
 WORKDIR /infrawave
 ```
+
+**查看 docker 挂载 nfs 路径**
+```
+docker inspect -f '{{json .HostConfig.Binds}}' e4cfd7628c18
+```
+

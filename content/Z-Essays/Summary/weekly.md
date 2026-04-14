@@ -121,16 +121,81 @@ dv.paragraph(`### ${headers[i]}\n${row[i]}`);
 }
 ```
 
-## 本周待做
+## ==本周待做==
 
-```dataview
-TASK
-FROM "Z-Essays/Daily"
-WHERE !completed
-AND file.day >= date(today) - dur(7 days)
-AND regexreplace(text, "\\s", "") != ""
-SORT file.day DESC
+```dataviewjs
+const dailyFolder = "Z-Essays/Daily";
+const today = dv.date("today");
+
+// 时间范围：本周一 ~ 本周日
+const thisMonday = today.minus({ days: today.weekday - 1 });
+const thisSunday = thisMonday.plus({ days: 6 });
+
+const pages = dv.pages(`"${dailyFolder}"`)
+  .where(p => p.file.day &&
+    p.file.day.toMillis() >= thisMonday.toMillis() &&
+    p.file.day.toMillis() <= thisSunday.toMillis());
+
+function normalizeTaskText(text) {
+  return (text || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+// key => Map<dayMs, record>
+// 同一天同一任务出现多次时，completed 状态优先
+const taskDayMap = new Map();
+
+for (const page of pages) {
+  const dayMs = page.file.day.toMillis();
+  for (const task of page.file.tasks) {
+    const raw = (task.text || "").trim();
+    if (!raw) continue;
+
+    const key = normalizeTaskText(raw);
+    if (!taskDayMap.has(key)) taskDayMap.set(key, new Map());
+
+    const dayBucket = taskDayMap.get(key);
+    const existing = dayBucket.get(dayMs);
+
+    if (!existing || (!existing.completed && task.completed)) {
+      dayBucket.set(dayMs, {
+        text: raw,
+        completed: !!task.completed,
+        day: page.file.day,
+        file: page.file.link
+      });
+    }
+  }
+}
+
+// 每个任务只看最新那天的状态
+const latestPending = [];
+
+for (const [key, dayBucket] of taskDayMap.entries()) {
+  const records = [...dayBucket.values()]
+    .sort((a, b) => b.day.toMillis() - a.day.toMillis());
+
+  const latest = records[0];
+
+  // 最新那天已完成 → 不显示
+  if (latest.completed) continue;
+
+  latestPending.push(latest);
+}
+
+latestPending.sort((a, b) => b.day.toMillis() - a.day.toMillis());
+
+if (latestPending.length === 0) {
+  dv.paragraph("—");
+} else {
+  for (const item of latestPending) {
+    dv.paragraph(`- [ ] ${item.text}  \n  ↳ ${item.day.toFormat("yyyy-MM-dd")} ${item.file}`);
+  }
+}
 ```
+
 ## ==上周回顾==
 
 ```dataviewjs
