@@ -26,10 +26,11 @@ python setup.py build_ext --inplace
 ![image.png](https://liuda-1370225914.cos.ap-beijing.myqcloud.com/obsidian/picgo/20260306135427704.png)
 写一个 `requirements.txt` 一键 pip install 这些 whl 轮子。
 ```
+pip3 config set global.index-url http://nexus.sii.shaipower.online/repository/pypi/simple/ 
+pip3 config set global.trusted-host nexus.sii.shaipower.online
 # requirements.txt
 packaging==24.2
-mpi4py
-cuda.core
+pip install mpi4py cuda.core
 ```
 安装（==每个 node 上执行==）：
 ```
@@ -78,3 +79,12 @@ def alltoallv(
 
 ## 3. test example
 vccl alltoallv的测试脚本路径为： `VCCL/nccl4py/examples/01_basic/03_alltoallv.py`
+
+## 4. optim
+* 优化 alltoallv python-->c++之间的 cpu 调用，主要是 nccl4py/nccl/core/communicator.py 
+  * check_valid, 检查 comm 是不是空，==可以删==
+  * NcclBuffer(sendbuff)和NcclBuffer(recvbuff)，把 tensor 变成 NcclBuffer 对象
+    * 改动 1. 内部调用_torch_to_nccl(每次都回去构建一个_unsupported_dtypes表)，现在直接==缓存一次==这个表，每次 get 一下。
+    * 改动 2. 在上层就知道三个 buffer 的类型，所以==直接在上层调用一次==_to_nccl_dtype给到三个 buffer。
+  * _validate_buffer_device 可以直接==删掉==
+  * 类型转化理论上最优==还可以收敛到== python list 用一次 np 转成 uintp（size_t*）丢给 c++
