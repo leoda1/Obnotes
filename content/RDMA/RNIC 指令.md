@@ -95,3 +95,21 @@ Show lldp table
 sudo config interface shutdown Ethernet248
 sudo config interface startup Ethernet248
 ```
+
+# 3. 基础指令
+
+```shell title='看网卡 ip 等等'
+for d in mlx5_bond_8; do
+    echo "=== $d ==="
+    ibdev2netdev -v | grep $d
+    show_gids $d 2>/dev/null || ibv_devinfo -d $d | head -30
+    done
+```
+
+```shell title="ucx 走管理网卡打流"
+# 服务端机器上执行 ip 是 10.0.26.138
+UCX_NET_DEVICES=mlx5_bond_0:1 UCX_IB_GID_INDEX=3 ucx_perftest -t tag_bw
+
+# 客户端上执行
+UCX_NET_DEVICES=mlx5_bond_0:1 UCX_IB_GID_INDEX=3 ucx_perftest 10.0.26.138 -t tag_bw
+```

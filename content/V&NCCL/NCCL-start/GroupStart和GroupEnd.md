@@ -720,4 +720,4 @@ struct alignas(16) ncclDevKernelArgs {
 
 ## 7. Figure
 
-![[NCCL/NCCL-start/excalidraw/image 4.png]]
+![[V&NCCL/NCCL-start/excalidraw/image 4.png]]

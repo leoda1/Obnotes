@@ -17,7 +17,7 @@ GPU 通信执行
 ```
 **从 Python 调用开始，经过 Python 包装 → Cython 绑定 → 动态库加载 → NCCL C 库，最终在 GPU 上执行通信操作。**
 ### 1.2 compile and test
-* step1. VCCL/nccl4py路径下直接编译(==主 node 执行==就可以完成 nccl4py的编译)：
+* step1. VCCL/nccl4py路径下直接编译(==主 node 执行==就可以完成 nccl4py的编译，如果缺少包就自己看缺啥 pip install 啥)：
 ```shell
 export CUDA_HOME=/usr/local/cuda
 python setup.py build_ext --inplace

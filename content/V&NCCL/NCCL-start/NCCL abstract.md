@@ -14,7 +14,7 @@
 
 以上a-d的过程大致如下图：
 
-![[NCCL/NCCL-start/excalidraw/image.png]]
+![[V&NCCL/NCCL-start/excalidraw/image.png]]
 
 7. **库初始化**`**ncclInit()**`：初始化全局状态
 8. **唯一 ID 生成**`**ncclGetUniqueId()**`：创建唯一标识符
@@ -24,7 +24,7 @@
 
 以上a-f的全过程的大致流程如下图：
 
-![[NCCL/NCCL-start/excalidraw/image 1.png]]
+![[V&NCCL/NCCL-start/excalidraw/image 1.png]]
 
 12. **API 层**：为应用程序提供公共接口
 13. **初始化系统**：处理库初始化和通信器设置
@@ -99,8 +99,8 @@ NCCL支持如下的集合通讯操作：
 
 ncclComm：
 
-![[NCCL/NCCL-start/excalidraw/image 2.png]]
+![[V&NCCL/NCCL-start/excalidraw/image 2.png]]
 
 ncclTopoSystem：
 
-![[NCCL/NCCL-start/excalidraw/image 3.png]]
+![[V&NCCL/NCCL-start/excalidraw/image 3.png]]

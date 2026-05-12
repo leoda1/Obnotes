@@ -6,10 +6,11 @@
 ### b. NCCL4PY
 * 涉及内存alloc和vccl alltoallv的c++接口怎么直接给上层使用 [[nccl4py]]
 ### c. VCCL
-* 完整的无核alltoallv的开发[[vccl alltoallv dev log]]
-* B300 atoallv测试数据 
+* 完整的无核alltoallv的开发[[4. vccl alltoallv dev log]]
+* B300 atoallv测试数据
+* 发版: [[6. vccl v2(p2p+a2av) release]]
 ### d. VCCL Document
-* 简洁明了的对外说明and [[vccl alltoallv for moe training]]
+* 简洁明了的对外说明： [[vccl alltoallv for moe training]]
 
 ## 2. timeline
 - [x] 过一遍当前进度，弄清楚现在的buffer设计：[vccl moe in feishu](https://infrawaves.feishu.cn/wiki/Oi8twqYNLizawSk0LCPcCpQen4b) 🛫 2026-01-14 ✅ 2026-01-15
@@ -28,4 +29,5 @@
 - [x] 在 alltoallv 的开始增加一个 barrier 来确保 coll 算法不会出现 wrong ✅ 2026-03-04
 - [x] 如何在另一个ctx内增加proxyPut/proxyWait来让relaybuffer不会机间影响机内，📅 2026-03-05，讨论后认为复杂度太高，目前优先级降低。 ✅ 2026-03-06      **pending**
 - [x] 等待 cq 确定 max_connections的 bug 出现在哪一侧 去追这个 bug 跑一下 nccl 最佳 benchmark(max_connections=32) ✅ 2026-03-16
-- [ ] alltoallv 性能优化
+- [x] 优化 nccl4py 内的 cpu 调用减少了抖动，略微增加性能 ✅ 2026-04-26
+- [x] release 完整的 vccl v2 ✅ 2026-05-11

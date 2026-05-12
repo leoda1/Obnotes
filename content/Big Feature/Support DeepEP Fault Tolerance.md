@@ -621,7 +621,7 @@ graph TB
 # 4. self-test
 ## 4.1 测试小手册
 ### down口
-测试的时候通过网卡或者交换机down口，所有操作见[[How to Down RNIC Port]]。
+测试的时候通过网卡或者交换机down口，所有操作见[[RNIC 指令]]。
 ### 查看网卡流量
 用mlnx_perf + ibstat看到的对应网卡名字
 ```shell
