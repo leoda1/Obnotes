@@ -205,11 +205,7 @@ internode::dispatch(
   low_latency_mode);                               // 是否低时延模式（IBGDA 纯 RDMA）
 ```
 
-
-
-
 ![[token dispatcher + fuse_a2a 2026-01-13 21.20.17.excalidraw]]
-
 
 ## 2. Combine
 ```python
