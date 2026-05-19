@@ -1,7 +1,7 @@
 ## 1. 概述
 ### a. Megatron
 * [Buffer](https://infrawaves.feishu.cn/wiki/Cscdw9sF8iDntlknRFocHRFNnrc?fromScene=spaceOverview) 的创建，这个部分需要提前创建出来对称内存提供给permute+layout部分使用。
-* permute+layout部分的流程为[[token dispatcher + fuse_a2a]]
+* permute+layout部分的流程为 [[token dispatcher + fuse_a2a]]
 * megatron 侧 alltoallv 所有改动：[[alltoallv ep overlap]]
 ### b. NCCL4PY
 * 涉及内存alloc和vccl alltoallv的c++接口怎么直接给上层使用 [[nccl4py]]
@@ -31,3 +31,4 @@
 - [x] 等待 cq 确定 max_connections的 bug 出现在哪一侧 去追这个 bug 跑一下 nccl 最佳 benchmark(max_connections=32) ✅ 2026-03-16
 - [x] 优化 nccl4py 内的 cpu 调用减少了抖动，略微增加性能 ✅ 2026-04-26
 - [x] release 完整的 vccl v2 ✅ 2026-05-11
+- [ ] B300 跑通 deepseek 训练 [[VCCL v2 moe training DeepSeek model usage]]

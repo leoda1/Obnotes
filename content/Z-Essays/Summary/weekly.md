@@ -1,4 +1,19 @@
+## **2026 Q1-2**
 
+1️⃣ ai stack 填写：[ai stack click here](https://infrawaves.feishu.cn/wiki/Qfm9wkrjQi6uqdku2vycI2xVnQb?table=tblcwhE2bNQdVpgW&view=vewLCEf7Ab&source_type=message&from=message&disposable_login_token=eyJ1c2VyX2lkIjoiNzQ4MDg4MjUyMzUwNjI5NDc4NiIsImRldmljZV9sb2dpbl9pZCI6Ijc1MDMwNjA1MTM3NDA0NzIzMzkiLCJ0aW1lc3RhbXAiOjE3NzUxMzIxNTYsInVuaXQiOiJldV9uYyIsInB3ZF9sZXNzX2xvZ2luX2F1dGgiOiIxIiwidmVyc2lvbiI6InYzIiwidGVuYW50X2JyYW5kIjoiZmVpc2h1IiwicGtnX2JyYW5kIjoi6aOe5LmmIn0=.0706908b10fb89b0b5c4f8b522195db44f50d187f0f49ddb2189990f6d006ae7)
+
+2️⃣ 填写公司工作台周报：[https://applink.feishu.cn/T95cCs5I0LJu](https://applink.feishu.cn/T95cCs5I0LJu)
+
+3️⃣ 周一 moon 周报：[研发项目跟踪](https://infrawaves.feishu.cn/wiki/SBVXwqp6riYj9wkM0uFcxjkBn0e?disposable_login_token=eyJ1c2VyX2lkIjoiNzQ4MDg4MjUyMzUwNjI5NDc4NiIsImRldmljZV9sb2dpbl9pZCI6Ijc1MDMwNjA1MTM3NDA0NzIzMzkiLCJ0aW1lc3RhbXAiOjE3NzUxMzIyMjQsInVuaXQiOiJldV9uYyIsInB3ZF9sZXNzX2xvZ2luX2F1dGgiOiIxIiwidmVyc2lvbiI6InYzIiwidGVuYW50X2JyYW5kIjoiZmVpc2h1IiwicGtnX2JyYW5kIjoi6aOe5LmmIn0=.83254c410b87bbe7b22de111fad32dcd94ae728bffda740623e6d4018d76d1c4)
+
+4️⃣ 周二填写智源陈默周报：[https://jwolpxeehx.feishu.cn/docx/V1dPdSWEPo1dQNxLxqzcCqfdnYc](https://jwolpxeehx.feishu.cn/docx/V1dPdSWEPo1dQNxLxqzcCqfdnYc)
+     填写陈默PD 分离文档: https://jwolpxeehx.feishu.cn/docx/NFM0daDQFod2qRxrCedctcf6n0b
+
+5️⃣ 周三填写贾博进展周报：
+
+6️⃣ 周四填写智源玉龙周报：[https://jwolpxeehx.feishu.cn/wiki/FjhmwHt7Lifzz1kvaN1cpz8PnSg](https://jwolpxeehx.feishu.cn/wiki/FjhmwHt7Lifzz1kvaN1cpz8PnSg)
+
+7️⃣ 1.0发版周报：[https://jwolpxeehx.feishu.cn/docx/I1v7dx64coRKAlxieY9cX3wpn3F](https://jwolpxeehx.feishu.cn/docx/I1v7dx64coRKAlxieY9cX3wpn3F)
 ## ==本周总览==
 
 ```dataviewjs

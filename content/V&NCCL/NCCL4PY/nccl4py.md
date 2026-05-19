@@ -29,7 +29,7 @@ python setup.py build_ext --inplace
 pip3 config set global.index-url http://nexus.sii.shaipower.online/repository/pypi/simple/ 
 pip3 config set global.trusted-host nexus.sii.shaipower.online
 # requirements.txt
-packaging==24.2
+pip install packaging==24.2
 pip install mpi4py cuda.core
 ```
 安装（==每个 node 上执行==）：
