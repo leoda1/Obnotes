@@ -257,17 +257,51 @@ def combine_preprocess(self, hidden_states: torch.Tensor) -> torch.Tensor:
 | v3.1(with 1 node) |        | ✅        | ✅         |
 
 # QWEN
+
+## using nccl a2a
+
+### 启动参数
+
 ## using vccl a2av
 ### 启动脚本和参数
-```py title=""
-
-```
-
 
 ```sh title="mpi_vccl.sh"
-同上面
-```
+#! /bin/bash
 
+TIMESTAMP=$(date +'%Y.%m.%d-%H:%M:%S')
+
+NET_DEVICE="bond0"
+MLP_GPU=8
+MLP_MPI_HOSTFILE=$2
+MLP_WORKER_0_PORT=29500
+MLP_WORKER_NUM=$3
+source $1
+
+mkdir -p logs/${EXP_NAME}
+mpirun -np $((MLP_WORKER_NUM * MLP_GPU)) \
+        --hostfile ${MLP_MPI_HOSTFILE} \
+        --allow-run-as-root   \
+        --output-filename logs/${TIMESTAMP} \
+        --mca oob_tcp_if_include ${NET_DEVICE} \
+        -x NCCL_IB_TC=106 \
+        -x NCCL_IB_GID_INDEX=3 \
+        -x NCCL_DEBUG=WARN \
+        -x NCCL_IB_HCA==roce_vf_rail0:1,roce_vf_rail1:1,roce_vf_rail2:1,roce_vf_rail3:1,roce_vf_rail4:1,roce_vf_rail5:1,roce_vf_rail6:1,roce_vf_rail7:1 \
+	-x PATH \
+	-x NCCL_NET_PLUGIN=None \
+        -x PYTHONPATH="${PYTHONPATH}:/workspace/daliu/VCCL/nccl4py" \
+        -x LD_LIBRARY_PATH=/workspace/daliu/VCCL/build/lib:$LD_LIBRARY_PATH \
+	-x MASTER_ADDR=$(cat $MLP_MPI_HOSTFILE | head -n 1 | sed -s 's/slots=8//g') \
+        -x MASTER_PORT=${MLP_WORKER_0_PORT} \
+        -x GLOO_SOCKET_IFNAME=${NET_DEVICE} \
+        -x NCCL_SOCKET_IFNAME=${NET_DEVICE} \
+        -x UCX_NET_DEVICES=${NET_DEVICE} \
+        -x CUDA_DEVICE_MAX_CONNECTIONS=32 \
+        -x NCCL_PXN_DISABLE=1 \
+        -x NCCL_PASS_SM=0 \
+        -x NCCL_CUMEM_ENABLE=1 \
+        python ${script_path} ${gpt_options} 2>&1 | tee logs/${EXP_NAME}/output_${TIMESTAMP}.log
+```
 
 ```shell title='config.sh'
 #!/bin/bash
@@ -374,8 +408,6 @@ gpt_options="
     ${LOGGING_ARGS} \
 "
 ```
-
-
 
 ### 问题
 1. qwen 会用 `--moe-router-dtype fp32`， 而权重是 `--bf16`，在 vccl_utills 内 hardcode 成一模一样，然后导致用权重的精度去存 probs ，报错是：
