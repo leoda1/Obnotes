@@ -30,5 +30,6 @@
 - [x] 如何在另一个ctx内增加proxyPut/proxyWait来让relaybuffer不会机间影响机内，📅 2026-03-05，讨论后认为复杂度太高，目前优先级降低。 ✅ 2026-03-06
 - [x] 等待 cq 确定 max_connections的 bug 出现在哪一侧 去追这个 bug 跑一下 nccl 最佳 benchmark(max_connections=32) ✅ 2026-03-16
 - [x] 优化 nccl4py 内的 cpu 调用减少了抖动，略微增加性能 ✅ 2026-04-26
-- [x] release 完整的 vccl v2 ✅ 2026-05-11
-- [x] B300 跑通 deepseek/qwen 训练 [[Megatron training DeepSeek&&Qwen model usage]] ✅ 2026-05-21
+- [x] release 完整的 vccl v2 [[6. vccl v2(p2p+a2av) release]]✅ 2026-05-11
+- [x] B300 跑通 deepseek/qwen 训练 https://infrawaves.feishu.cn/wiki/SDqdwRVdjiPojDk0ZBHcBsuRnBf?from=from_copylink ✅ 2026-05-21
+- [ ] debug 现在的 v2 代码为什么会出现 sub->reg失败，nccl-test正常能注册额，但是训练的时候强行注册反而失败。
