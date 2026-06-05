@@ -15,7 +15,9 @@
      - [x] flagcx connector实现，放在vllm-plugin-fl；Nccl engine->flagcx engine，和mooncake性能对齐； [[5. flagcx connector design&&dev&&test]] ✅ 2026-05-7
      - [x] Mooncake xfer engine源码学习 [[0. mooncake rdma transfer]] ✅ 2026-05-23
      - [x] vllm 如何管理 kv cache，nixl 和 mooncake 的 connector 如何使用 block 索引 kv cache 并指挥底层 rdma ✅ 2026-05-23
- - [ ] 在 flagcx 内设计一套多线程高性能的post wr+poll cq（定义general的数据结构处理上层的业务输入，然后flagcx_p2p内能初始化2worker）[[2. 多后端多线程的 ibrc p2p 方案设计]]
+ - [x] 在 flagcx 内设计、开发、测试一套多线程高性能的post wr+poll cq（定义general的数据结构处理上层的业务输入，然后flagcx_p2p内能初始化2worker）[[2. 多后端多线程的 ibrc p2p 方案设计]] ✅ 2026-06-02
+ - [x] flagcx p2p engine 增加 rpc 服务以及对外的 python wrapper [[3. flagcx ibrc p2p RPC 服务 + flagcx connector 改动]] ✅ 2026-06-02
+ - [ ] 优化 flagcx connector 性能直到大于 mooncake 性能。
  - [ ] glm 模型用 flagos 跑通 [[3. vllm glm5 1P1D 推理]]
 
 **核心工作 2：glm-5 使用 flag 系列完成 vllm pd 分离推理**
