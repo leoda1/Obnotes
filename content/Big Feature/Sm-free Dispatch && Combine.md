@@ -32,4 +32,4 @@
 - [x] 优化 nccl4py 内的 cpu 调用减少了抖动，略微增加性能 ✅ 2026-04-26
 - [x] release 完整的 vccl v2 [[6. vccl v2(p2p+a2av) release]]✅ 2026-05-11
 - [x] B300 跑通 deepseek/qwen 训练 https://infrawaves.feishu.cn/wiki/SDqdwRVdjiPojDk0ZBHcBsuRnBf?from=from_copylink ✅ 2026-05-21
-- [ ] debug 现在的 v2 代码为什么会出现 sub->reg失败，nccl-test正常能注册额，但是训练的时候强行注册反而失败。
+- [x] debug 现在的 v2 代码为什么会出现 sub->reg失败，nccl-test正常能注册额，但是训练的时候强行注册反而失败。 机器gid 选择问题✅ 2026-06-08
