@@ -625,7 +625,9 @@ graph TB
 ### 查看网卡流量
 用mlnx_perf + ibstat看到的对应网卡名字
 ```shell
-mlnx_perf -i enp41s0np0
+ibdev2netdev
+cat /proc/net/bonding/bond7
+mlnx_perf -i enp214s0f1np1
 ```
 ### 查看网卡GID
 这一部分通过在nvshmem内拓展get_device_qp的函数(可以把sqn和iid写到qp内)，并在device_qp的结构体增加这两个字段，后期在deepep的kernel内就可以打印出来QP的gid，来debug走备份的时候每个备份网卡是不是走到正确的规定的backup nic的gid。

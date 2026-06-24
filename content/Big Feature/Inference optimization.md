@@ -17,7 +17,10 @@
      - [x] vllm 如何管理 kv cache，nixl 和 mooncake 的 connector 如何使用 block 索引 kv cache 并指挥底层 rdma ✅ 2026-05-23
  - [x] 在 flagcx 内设计、开发、测试一套多线程高性能的post wr+poll cq（定义general的数据结构处理上层的业务输入，然后flagcx_p2p内能初始化2worker）[[2. 多后端多线程的 ibrc p2p 方案设计]] ✅ 2026-06-02
  - [x] flagcx p2p engine 增加 rpc 服务以及对外的 python wrapper [[3. flagcx ibrc p2p RPC 服务 + flagcx connector 改动]] ✅ 2026-06-02
- - [ ] 优化 flagcx connector 性能直到大于 mooncake 性能。
+ - [x] [[4. vllm v1 调度逻辑 和 distributed 分布式原理]] ✅ 2026-06-10
+ - [x] 不连续 kv transfer benchmark 设计开发测试 [[1. 不连续kv transfer benchmark 设计开发测试]] ✅ 2026-06-15
+ - [x] 小 size 的 latency 优化 https://jwolpxeehx.feishu.cn/docx/DJandd7giocB4IxDQrrcEfWannc ✅ 2026-06-24
+ - [ ] 跑通沐曦平台qwen/minimax 以及 pd 分离
  - [ ] glm 模型用 flagos 跑通 [[3. vllm glm5 1P1D 推理]]
 
 **核心工作 2：glm-5 使用 flag 系列完成 vllm pd 分离推理**

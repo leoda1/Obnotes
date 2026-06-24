@@ -33,3 +33,4 @@
 - [x] release 完整的 vccl v2 [[6. vccl v2(p2p+a2av) release]]✅ 2026-05-11
 - [x] B300 跑通 deepseek/qwen 训练 https://infrawaves.feishu.cn/wiki/SDqdwRVdjiPojDk0ZBHcBsuRnBf?from=from_copylink ✅ 2026-05-21
 - [x] debug 现在的 v2 代码为什么会出现 sub->reg失败，nccl-test正常能注册额，但是训练的时候强行注册反而失败。 机器gid 选择问题✅ 2026-06-08
+- [x] 调整 batch0 的机内 alltoall 调度（把自己拷贝自己的 cudaMemcpyAsync 调度到机内 batch0 的最后一次） https://github.com/sii-research/VCCL/pull/57 ✅ 2026-06-24
