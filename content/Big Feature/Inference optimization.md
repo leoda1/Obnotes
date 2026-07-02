@@ -18,7 +18,8 @@
  - [x] [[4. vllm v1 调度逻辑 和 distributed 分布式原理]] ✅ 2026-06-10
  - [x] 不连续 kv transfer benchmark 设计开发测试 [[1. 不连续kv transfer benchmark 设计开发测试]] ✅ 2026-06-15
  - [x] 小 size 的 latency 优化 https://jwolpxeehx.feishu.cn/docx/DJandd7giocB4IxDQrrcEfWannc ✅ 2026-06-24
- - [ ] 跑通 沐曦 / 海光 平台 qwen / minimax 以及 pd 分离 [[0. hygon && muxi]]
+ - [ ] 跑通 海光 平台 qwen / glm 以及 pd 分离 [[0. hygon && muxi]]
+ - [ ] 跑通 沐曦 平台 qwen / glm 以及 pd 分离 [[0. hygon && muxi]]
  - [ ] glm 模型用 flagos 跑通 [[3. vllm glm5 1P1D 推理]]
 
 **核心工作 2：glm-5 使用 flag 系列完成 vllm pd 分离推理**

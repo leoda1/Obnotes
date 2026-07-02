@@ -1,8 +1,8 @@
 ## 1. 概述
 ### a. Megatron
 * [Buffer](https://infrawaves.feishu.cn/wiki/Cscdw9sF8iDntlknRFocHRFNnrc?fromScene=spaceOverview) 的创建，这个部分需要提前创建出来对称内存提供给permute+layout部分使用。
-* permute+layout部分的流程为 [[token dispatcher + fuse_a2a]]
-* megatron 侧 alltoallv 所有改动：[[alltoallv ep overlap]]
+* permute+layout部分的流程为 [[0.token dispatcher + fuse_a2a]]
+* megatron 侧 alltoallv 所有改动：[[1. MoE EP Overlap]]
 ### b. NCCL4PY
 * 涉及内存alloc和vccl alltoallv的c++接口怎么直接给上层使用 [[nccl4py]]
 ### c. VCCL
