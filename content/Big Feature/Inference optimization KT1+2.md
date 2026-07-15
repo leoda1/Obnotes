@@ -19,9 +19,9 @@
  - [x] 不连续 kv transfer benchmark 设计开发测试 [[1. 不连续kv transfer benchmark 设计开发测试]] ✅ 2026-06-15
  - [x] 小 size 的 latency 优化 https://jwolpxeehx.feishu.cn/docx/DJandd7giocB4IxDQrrcEfWannc ✅ 2026-06-24
  - [ ] 跑通 海光 平台 qwen / glm 以及 pd 分离 [[0. hygon && muxi]]
- - [ ] 跑通 沐曦 平台 qwen / glm 以及 pd 分离 [[0. hygon && muxi]]
- - [ ] 升级 flagcx connector 从 vllm0.13 到0.22 [[6. flagcx connector 升级至 vllm0.22]]
- - [ ] 0.24 vllm mooncake bashline + 0.24 vllm mooncake bashline + 0.20 vllm flagcx bashline
+ - [ ] 跑通 沐曦 平台 qwen / glm 以及 pd 分离 [[0. hygon && muxi]]     
+ - [x] 升级 flagcx connector 从 vllm0.13 到0.22 [[6. flagcx connector 升级至 vllm0.22]] ✅ 2026-07-14
+ - [x] 0.24 vllm mooncake bashline + 0.24 vllm mooncake bashline + 0.20 vllm flagcx bashline ✅ 2026-07-14
  - [ ] glm 模型用 flagos 跑通 [[3. vllm glm5 1P1D 推理]]
 
 **核心工作 2：glm-5 使用 flag 系列完成 vllm pd 分离推理**
