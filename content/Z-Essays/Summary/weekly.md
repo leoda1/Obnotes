@@ -19,40 +19,55 @@
 ```dataviewjs
 const dailyFolder = "Z-Essays/Daily";
 
-// 取今天所在周的周一
-const today = dv.date("today");
-const monday = today.minus({ days: today.weekday - 1 });
-
-// 周一到周五
-const days = Array.from({ length: 5 }, (_, i) => monday.plus({ days: i }));
-
-function fileNameOfDay(d) {
-  return d.toFormat("yyyy-MM-dd");
+function quarterFileName(d) {
+  const q = Math.ceil(d.month / 3);
+  return `${d.year}-Q${q}`;
 }
 
-function fileLinkOfDay(d) {
-  const name = fileNameOfDay(d);
-  const page = dv.page(`${dailyFolder}/${name}`);
-  return page ? page.file.link : name;
-}
-
-// 从 markdown 原文里提取某个标题下面的内容
-async function extractSection(path, headingText) {
-  const content = await dv.io.load(path);
-  if (!content) return "";
+// 日记现在按季度合并在一个文件里，每天是一个 "# YYYY-MM-DD Daily" 区块。
+// 定位某一天：先找到它所在的季度文件，再在文件内容里截出该天的区块（到下一个 "# " 之前）。
+async function loadDayBlock(d) {
+  const dateStr = d.toFormat("yyyy-MM-dd");
+  const qName = quarterFileName(d);
+  const content = await dv.io.load(`${dailyFolder}/${qName}.md`);
+  if (!content) return null;
 
   const lines = content.split("\n");
-
   let start = -1;
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    // 只要是标题行，并且包含关键词就算匹配
-    if (/^#{1,6}\s+/.test(line) && line.includes(headingText)) {
+    if (/^#\s+/.test(lines[i]) && lines[i].includes(dateStr)) {
+      start = i;
+      break;
+    }
+  }
+  if (start === -1) return null;
+
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^#\s+/.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  return {
+    qName,
+    dateStr,
+    heading: lines[start].replace(/^#\s+/, "").trim(),
+    lines: lines.slice(start, end),
+  };
+}
+
+// 在某一天的区块里，抓指定二级标题（如"今日TODO"）下面的内容
+function extractSubsection(block, headingText) {
+  const { lines } = block;
+  let start = -1;
+  for (let i = 1; i < lines.length; i++) {
+    const s = lines[i].trim();
+    if (/^#{1,6}\s+/.test(s) && s.includes(headingText)) {
       start = i + 1;
       break;
     }
   }
-
   if (start === -1) return "";
 
   let end = lines.length;
@@ -62,49 +77,44 @@ async function extractSection(path, headingText) {
       break;
     }
   }
-
   return lines.slice(start, end).join("\n").trim();
 }
 
-// 提取任务/列表并转成简短 HTML
-function toCompactHtml(md) {
-  if (!md || md === "—") return "—";
-  return md
-    .split("\n")
-    .filter(x => x.trim())
-    .map(x => x
-      .replace(/^- \[x\] /i, "✅ ")
-      .replace(/^- \[ \] /i, "⬜ ")
-      .replace(/^- /, "• "))
-    .join("<br>");
+function dayLink(block) {
+  return `[[${block.qName}#${block.heading}|${block.dateStr}]]`;
 }
+
+// 取今天所在周的周一
+const today = dv.date("today");
+const monday = today.minus({ days: today.weekday - 1 });
+
+// 周一到周五
+const days = Array.from({ length: 5 }, (_, i) => monday.plus({ days: i }));
 
 const row = [];
 
-// 周一到周五内容：优先取“今日进展”
+// 周一到周五内容：取「今日TODO」
 for (const d of days) {
-  const name = fileNameOfDay(d);
-  const page = dv.page(`${dailyFolder}/${name}`);
+  const dateStr = d.toFormat("yyyy-MM-dd");
+  const block = await loadDayBlock(d);
 
-  if (!page) {
-    row.push(`**${name}**<br>—`);
+  if (!block) {
+    row.push(`**${dateStr}**<br>—`);
     continue;
   }
 
-  const section = await extractSection(page.file.path, "今日TODO");
-  row.push(`${page.file.link}\n${section || "—"}`);
+  const section = extractSubsection(block, "今日TODO");
+  row.push(`${dayLink(block)}\n${section || "—"}`);
 }
 
-// 第六列：当前周报页内容
+// 第六列：本周完成汇总
 const allDone = [];
 
 for (const d of days) {
-  const name = fileNameOfDay(d);
-  const page = dv.page(`${dailyFolder}/${name}`);
+  const block = await loadDayBlock(d);
+  if (!block) continue;
 
-  if (!page) continue;
-
-  const section = await extractSection(page.file.path, "今日TODO");
+  const section = extractSubsection(block, "今日TODO");
   if (!section) continue;
 
   const done = section
@@ -116,23 +126,21 @@ for (const d of days) {
   allDone.push(...done);
 }
 
-// ✅ 关键：保证永远有字符串输出
 let weeklySummary = "—";
 
 if (allDone.length > 0) {
   const uniqueDone = [...new Set(allDone)];
-  weeklySummary = uniqueDone.length  
-        ? uniqueDone.map(x => `• ${x}`).join("<br>")  
-        : "—";
+  weeklySummary = uniqueDone.length
+    ? uniqueDone.map(x => `• ${x}`).join("<br>")
+    : "—";
 }
 
-// 👇 强制保证不是 undefined / 空
 row.push(weeklySummary || "—");
 
-const headers = ["周一", "周二", "周三", "周四", "周五", "周报"];  
-  
-for (let i = 0; i < headers.length; i++) {  
-dv.paragraph(`### ${headers[i]}\n${row[i]}`);  
+const headers = ["周一", "周二", "周三", "周四", "周五", "周报"];
+
+for (let i = 0; i < headers.length; i++) {
+  dv.paragraph(`### ${headers[i]}\n${row[i]}`);
 }
 ```
 
@@ -146,15 +154,33 @@ const today = dv.date("today");
 const thisMonday = today.minus({ days: today.weekday - 1 });
 const thisSunday = thisMonday.plus({ days: 6 });
 
-const pages = dv.pages(`"${dailyFolder}"`)
-  .where(p => p.file.day &&
-    p.file.day.toMillis() >= thisMonday.toMillis() &&
-    p.file.day.toMillis() <= thisSunday.toMillis());
+function quarterFileName(d) {
+  const q = Math.ceil(d.month / 3);
+  return `${d.year}-Q${q}`;
+}
+
+// 这一周可能横跨两个季度文件（季度交界那几天）
+const qNames = new Set();
+for (let d = thisMonday; d <= thisSunday; d = d.plus({ days: 1 })) {
+  qNames.add(quarterFileName(d));
+}
+
+const lineCache = {};
+async function getLines(path) {
+  if (!lineCache[path]) {
+    const content = await dv.io.load(path);
+    lineCache[path] = content ? content.split("\n") : [];
+  }
+  return lineCache[path];
+}
 
 function normalizeTaskText(text) {
   return (text || "")
     .trim()
+    .replace(/\s*✅\s*\d{4}-\d{2}-\d{2}\s*$/, "") // 去掉完成日期标记（勾选后文本会变，否则匹配不上之前几天）
+    .trim()
     .replace(/\s+/g, " ")
+    .replace(/[?？!！。.,，、~～]+$/g, "") // 去掉结尾标点的重复/漂移（比如抄写多天后 "？" 变 "？？？？"）
     .toLowerCase();
 }
 
@@ -162,15 +188,36 @@ function normalizeTaskText(text) {
 // 同一天同一任务出现多次时，completed 状态优先
 const taskDayMap = new Map();
 
-for (const page of pages) {
-  const dayMs = page.file.day.toMillis();
+for (const qName of qNames) {
+  const page = dv.page(`${dailyFolder}/${qName}`);
+  if (!page) continue;
+
+  const lines = await getLines(page.file.path);
+
   for (const task of page.file.tasks) {
+    // 该 task 属于哪一天：往上找最近的 "# YYYY-MM-DD Daily"
+    let dateStr = null;
+    let dayHeading = null;
+    for (let i = task.line; i >= 0; i--) {
+      const m = lines[i] && lines[i].match(/^#\s+(\d{4}-\d{2}-\d{2})(?:（周.）)?\s*Daily/);
+      if (m) {
+        dateStr = m[1];
+        dayHeading = lines[i].replace(/^#\s+/, "").trim();
+        break;
+      }
+    }
+    if (!dateStr) continue;
+
+    const day = dv.date(dateStr);
+    if (!(day >= thisMonday && day <= thisSunday)) continue;
+
     const raw = (task.text || "").trim();
     if (!raw) continue;
 
     const key = normalizeTaskText(raw);
     if (!taskDayMap.has(key)) taskDayMap.set(key, new Map());
 
+    const dayMs = day.toMillis();
     const dayBucket = taskDayMap.get(key);
     const existing = dayBucket.get(dayMs);
 
@@ -178,8 +225,8 @@ for (const page of pages) {
       dayBucket.set(dayMs, {
         text: raw,
         completed: !!task.completed,
-        day: page.file.day,
-        file: page.file.link
+        day: day,
+        link: `[[${qName}#${dayHeading}|${dateStr}]]`
       });
     }
   }
@@ -206,7 +253,7 @@ if (latestPending.length === 0) {
   dv.paragraph("—");
 } else {
   for (const item of latestPending) {
-    dv.paragraph(`- [ ] ${item.text}  \n  ↳ ${item.day.toFormat("yyyy-MM-dd")} ${item.file}`);
+    dv.paragraph(`- [ ] ${item.text}  \n  ↳ ${item.day.toFormat("yyyy-MM-dd")} ${item.link}`);
   }
 }
 ```
@@ -216,41 +263,52 @@ if (latestPending.length === 0) {
 ```dataviewjs
 const dailyFolder = "Z-Essays/Daily";
 
-// 取上周的周一
-const today = dv.date("today");
-const thisMonday = today.minus({ days: today.weekday - 1 });
-const monday = thisMonday.minus({ days: 7 });
-
-// 上周周一到周五
-const days = Array.from({ length: 5 }, (_, i) => monday.plus({ days: i }));
-
-function fileNameOfDay(d) {
-  return d.toFormat("yyyy-MM-dd");
+function quarterFileName(d) {
+  const q = Math.ceil(d.month / 3);
+  return `${d.year}-Q${q}`;
 }
 
-function fileLinkOfDay(d) {
-  const name = fileNameOfDay(d);
-  const page = dv.page(`${dailyFolder}/${name}`);
-  return page ? page.file.link : name;
-}
-
-// 从 markdown 原文里提取某个标题下面的内容
-async function extractSection(path, headingText) {
-  const content = await dv.io.load(path);
-  if (!content) return "";
+async function loadDayBlock(d) {
+  const dateStr = d.toFormat("yyyy-MM-dd");
+  const qName = quarterFileName(d);
+  const content = await dv.io.load(`${dailyFolder}/${qName}.md`);
+  if (!content) return null;
 
   const lines = content.split("\n");
-
   let start = -1;
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    // 只要是标题行，并且包含关键词就算匹配
-    if (/^#{1,6}\s+/.test(line) && line.includes(headingText)) {
+    if (/^#\s+/.test(lines[i]) && lines[i].includes(dateStr)) {
+      start = i;
+      break;
+    }
+  }
+  if (start === -1) return null;
+
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^#\s+/.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  return {
+    qName,
+    dateStr,
+    heading: lines[start].replace(/^#\s+/, "").trim(),
+    lines: lines.slice(start, end),
+  };
+}
+
+function extractSubsection(block, headingText) {
+  const { lines } = block;
+  let start = -1;
+  for (let i = 1; i < lines.length; i++) {
+    const s = lines[i].trim();
+    if (/^#{1,6}\s+/.test(s) && s.includes(headingText)) {
       start = i + 1;
       break;
     }
   }
-
   if (start === -1) return "";
 
   let end = lines.length;
@@ -260,49 +318,44 @@ async function extractSection(path, headingText) {
       break;
     }
   }
-
   return lines.slice(start, end).join("\n").trim();
 }
 
-// 提取任务/列表并转成简短 HTML
-function toCompactHtml(md) {
-  if (!md || md === "—") return "—";
-  return md
-    .split("\n")
-    .filter(x => x.trim())
-    .map(x => x
-      .replace(/^- \[x\] /i, "✅ ")
-      .replace(/^- \[ \] /i, "⬜ ")
-      .replace(/^- /, "• "))
-    .join("<br>");
+function dayLink(block) {
+  return `[[${block.qName}#${block.heading}|${block.dateStr}]]`;
 }
+
+// 取上周的周一
+const today = dv.date("today");
+const thisMonday = today.minus({ days: today.weekday - 1 });
+const monday = thisMonday.minus({ days: 7 });
+
+// 上周周一到周五
+const days = Array.from({ length: 5 }, (_, i) => monday.plus({ days: i }));
 
 const row = [];
 
-// 上周周一到周五内容
 for (const d of days) {
-  const name = fileNameOfDay(d);
-  const page = dv.page(`${dailyFolder}/${name}`);
+  const dateStr = d.toFormat("yyyy-MM-dd");
+  const block = await loadDayBlock(d);
 
-  if (!page) {
-    row.push(`**${name}**<br>—`);
+  if (!block) {
+    row.push(`**${dateStr}**<br>—`);
     continue;
   }
 
-  const section = await extractSection(page.file.path, "今日TODO");
-  row.push(`${page.file.link}\n${section || "—"}`);
+  const section = extractSubsection(block, "今日TODO");
+  row.push(`${dayLink(block)}\n${section || "—"}`);
 }
 
 // 第六列：上周完成汇总
 const allDone = [];
 
 for (const d of days) {
-  const name = fileNameOfDay(d);
-  const page = dv.page(`${dailyFolder}/${name}`);
+  const block = await loadDayBlock(d);
+  if (!block) continue;
 
-  if (!page) continue;
-
-  const section = await extractSection(page.file.path, "今日TODO");
+  const section = extractSubsection(block, "今日TODO");
   if (!section) continue;
 
   const done = section
@@ -314,7 +367,6 @@ for (const d of days) {
   allDone.push(...done);
 }
 
-// 保证永远有字符串输出
 let weeklySummary = "—";
 
 if (allDone.length > 0) {
