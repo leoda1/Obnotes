@@ -8,6 +8,7 @@
 
 4️⃣ 周二填写智源陈默周报：[https://jwolpxeehx.feishu.cn/docx/V1dPdSWEPo1dQNxLxqzcCqfdnYc](https://jwolpxeehx.feishu.cn/docx/V1dPdSWEPo1dQNxLxqzcCqfdnYc)
      填写陈默PD 分离文档: https://jwolpxeehx.feishu.cn/docx/NFM0daDQFod2qRxrCedctcf6n0b
+     https://jwolpxeehx.feishu.cn/docx/JxEqdu0ZMord85xVmJEcRg0ZnOb
 
 5️⃣ 周三填写贾博进展周报：
 
