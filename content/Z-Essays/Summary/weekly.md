@@ -12,9 +12,8 @@
 
 5️⃣ 周三填写贾博进展周报：
 
-6️⃣ 周四填写智源玉龙周报：[https://jwolpxeehx.feishu.cn/wiki/FjhmwHt7Lifzz1kvaN1cpz8PnSg](https://jwolpxeehx.feishu.cn/wiki/FjhmwHt7Lifzz1kvaN1cpz8PnSg)
+6️⃣ 周四填写kt2周报：[https://jwolpxeehx.feishu.cn/wiki/LktqwyXIaiAXiFk6C5icRP4fnah](https://jwolpxeehx.feishu.cn/wiki/LktqwyXIaiAXiFk6C5icRP4fnah)
 
-7️⃣ 1.0发版周报：[https://jwolpxeehx.feishu.cn/docx/I1v7dx64coRKAlxieY9cX3wpn3F](https://jwolpxeehx.feishu.cn/docx/I1v7dx64coRKAlxieY9cX3wpn3F)
 ## ==本周总览==
 
 ```dataviewjs
@@ -142,120 +141,6 @@ const headers = ["周一", "周二", "周三", "周四", "周五", "周报"];
 
 for (let i = 0; i < headers.length; i++) {
   dv.paragraph(`### ${headers[i]}\n${row[i]}`);
-}
-```
-
-## ==本周待做==
-
-```dataviewjs
-const dailyFolder = "Z-Essays/Daily";
-const today = dv.date("today");
-
-// 时间范围：本周一 ~ 本周日
-const thisMonday = today.minus({ days: today.weekday - 1 });
-const thisSunday = thisMonday.plus({ days: 6 });
-
-function quarterFileName(d) {
-  const q = Math.ceil(d.month / 3);
-  return `${d.year}-Q${q}`;
-}
-
-// 这一周可能横跨两个季度文件（季度交界那几天）
-const qNames = new Set();
-for (let d = thisMonday; d <= thisSunday; d = d.plus({ days: 1 })) {
-  qNames.add(quarterFileName(d));
-}
-
-const lineCache = {};
-async function getLines(path) {
-  if (!lineCache[path]) {
-    const content = await dv.io.load(path);
-    lineCache[path] = content ? content.split("\n") : [];
-  }
-  return lineCache[path];
-}
-
-function normalizeTaskText(text) {
-  return (text || "")
-    .trim()
-    .replace(/\s*✅\s*\d{4}-\d{2}-\d{2}\s*$/, "") // 去掉完成日期标记（勾选后文本会变，否则匹配不上之前几天）
-    .trim()
-    .replace(/\s+/g, " ")
-    .replace(/[?？!！。.,，、~～]+$/g, "") // 去掉结尾标点的重复/漂移（比如抄写多天后 "？" 变 "？？？？"）
-    .toLowerCase();
-}
-
-// key => Map<dayMs, record>
-// 同一天同一任务出现多次时，completed 状态优先
-const taskDayMap = new Map();
-
-for (const qName of qNames) {
-  const page = dv.page(`${dailyFolder}/${qName}`);
-  if (!page) continue;
-
-  const lines = await getLines(page.file.path);
-
-  for (const task of page.file.tasks) {
-    // 该 task 属于哪一天：往上找最近的 "# YYYY-MM-DD Daily"
-    let dateStr = null;
-    let dayHeading = null;
-    for (let i = task.line; i >= 0; i--) {
-      const m = lines[i] && lines[i].match(/^#\s+(\d{4}-\d{2}-\d{2})(?:（周.）)?\s*Daily/);
-      if (m) {
-        dateStr = m[1];
-        dayHeading = lines[i].replace(/^#\s+/, "").trim();
-        break;
-      }
-    }
-    if (!dateStr) continue;
-
-    const day = dv.date(dateStr);
-    if (!(day >= thisMonday && day <= thisSunday)) continue;
-
-    const raw = (task.text || "").trim();
-    if (!raw) continue;
-
-    const key = normalizeTaskText(raw);
-    if (!taskDayMap.has(key)) taskDayMap.set(key, new Map());
-
-    const dayMs = day.toMillis();
-    const dayBucket = taskDayMap.get(key);
-    const existing = dayBucket.get(dayMs);
-
-    if (!existing || (!existing.completed && task.completed)) {
-      dayBucket.set(dayMs, {
-        text: raw,
-        completed: !!task.completed,
-        day: day,
-        link: `[[${qName}#${dayHeading}|${dateStr}]]`
-      });
-    }
-  }
-}
-
-// 每个任务只看最新那天的状态
-const latestPending = [];
-
-for (const [key, dayBucket] of taskDayMap.entries()) {
-  const records = [...dayBucket.values()]
-    .sort((a, b) => b.day.toMillis() - a.day.toMillis());
-
-  const latest = records[0];
-
-  // 最新那天已完成 → 不显示
-  if (latest.completed) continue;
-
-  latestPending.push(latest);
-}
-
-latestPending.sort((a, b) => b.day.toMillis() - a.day.toMillis());
-
-if (latestPending.length === 0) {
-  dv.paragraph("—");
-} else {
-  for (const item of latestPending) {
-    dv.paragraph(`- [ ] ${item.text}  \n  ↳ ${item.day.toFormat("yyyy-MM-dd")} ${item.link}`);
-  }
 }
 ```
 
