@@ -7,11 +7,11 @@
 
 回顾TP当中，我们将tensor并行性的规模超过一个node上的4或者8个gpu的时候会迫使我们用低带宽lower-bandwidth的网络通讯，简言之走了net（机间的IB，roce等）。
 
-![[Z-Essays/LLM/excalidraw/image.png|256MB数据在单机到64机（8gpu / node）上allreduce，algather，reduce-scatter的bandwidth变化图]]
+![[Megatron/LLM/excalidraw/image.png|256MB数据在单机到64机（8gpu / node）上allreduce，algather，reduce-scatter的bandwidth变化图]]
 
 sequence和context的并行对处理长序列输入有帮助，但是model本身参数太大的话这两种并行就没有什么用了。对于超过70B+ parameters的model，光是werights就会超过4-8个gpu的显存。这就需要用流水线并行pipeline parallelism来处理，就是将模型的计算层拆分成好几段，每个gpu分一些计算层，然后从前往后依次传递计算，从而避免了每个gpu必须加载完整的模型。
 
-![[Z-Essays/LLM/excalidraw/image 1.png|8B model使用PP前后对比]]
+![[Megatron/LLM/excalidraw/image 1.png|8B model使用PP前后对比]]
 
 上图中可以看到模型参数被均分了，但是每个gpu上占用的Activations激活值并没有减少！所以PP不会降低激活值的显存使用
 
@@ -29,7 +29,7 @@ sequence和context的并行对处理长序列输入有帮助，但是model本身
 
 如果绕过本质上的“顺序行”就可以让GPU始终繁忙。做最naive的forward和backward的时候GPU利用率如下：
 
-![[Z-Essays/LLM/excalidraw/image 2.png|模型的PP并行示例，参数：16个layer 4个GPU]]
+![[Megatron/LLM/excalidraw/image 2.png|模型的PP并行示例，参数：16个layer 4个GPU]]
 
 这里灰色部分表示剩余的空闲时间，也叫气泡(bubble)。现在假设t_f是前向传播时间，t_b是反向传播时间。并假设反向传播时间是前向传播时间的2倍。理想情况下完美的PP耗时应该是：t_id = t_f + t_b。实际中由于bubble会产生额外的时间损失t_pb = (p - 1) x (t_f + t _b)，这里p是并行度即GPU数量。可以用以下公式计算“气泡时间”相对于“理想总时间”的比例：
 
@@ -41,7 +41,7 @@ r_bubble = ((p − 1) × (t_f + t_b)) / (t_f + t_b) = p − 1
 
 现在将一个batch变为一堆micro-batches，使他们能够parallel的处理，下图为8个micro-batches
 
-![[Z-Essays/LLM/excalidraw/image 3.png]]
+![[Megatron/LLM/excalidraw/image 3.png]]
 
 图中展示的调度方式被称为 **全前向、全反向（AFAB，All Forward, All Backward）** 调度，因为我们先完成所有的前向传播步骤，然后再统一执行所有的反向传播步骤。这种方式的优势在于：前向与反向步骤仍然是整体上顺序执行的，因此我们得以**保留我们原本训练代码的整体结构与逻辑**。但是这是最简单最容易实现的流水线。Picotron中有AFAB的完整实现如下：
 
@@ -94,7 +94,7 @@ $$
 
 > 核心思想：尽早开始反向传播，这种叫1F1B。因为中间的稳定阶段会出现交替的forward和backward。
 
-![[Z-Essays/LLM/excalidraw/image 4.png|1F1B调度示意图]]
+![[Megatron/LLM/excalidraw/image 4.png|1F1B调度示意图]]
 
 对比AFAB的图，bubble并没有降低，训练效率本身没有提升。但是现在1F1B同时最多只需要为p个**micro-batches（p 是流水线并行度，即 GPU 数）保存激活值**，而不是像 AFAB 调度中那样需要为 *m* 个 micro-batches（即整个批次数量）保存激活值。此时再增加更多的micro-batches就可以降低气泡的大小。
 
@@ -166,7 +166,7 @@ $$
 > 
 > ```
 
-![[Z-Essays/LLM/excalidraw/image 5.png|1F1B在集群上的benchmarks]]
+![[Megatron/LLM/excalidraw/image 5.png|1F1B在集群上的benchmarks]]
 
 在图的左侧，当 micro-batch 的数量小于或等于流水线并行度减一（即 `m = p − 1`）时，我们可以看到“气泡”会带来多么严重的负面影响 —— 性能很低，甚至在扩大 PP 时还会进一步下降。图的右侧展示的是，当 micro-batch 数量远大于流水线并行度（比如m = 32 ≫ p - 1）时，**在较小 PP 并行度下性能得到明显提升**，尽管在非常大的 PP 并行度下仍然会受到限制。但在实际训练中，我们无法**无限制地增加 micro-batch 数量**以维持 `m ≫ p − 1` 的比率，最终一定会受限于一个固定的 **全局 batch size**。PP并行度(p)不论怎么增加，在 micro-batch 数量已经达到最大可能值的情况下，bubble还是按照`r_bubble = (p − 1) / m` 增长。
 
@@ -185,7 +185,7 @@ $$
 
 这样看起来像”looping pipeline”循环流水线，在forward计算的时候每个micro-batches会在GPU之间循环穿行。如下图：
 
-![[Z-Essays/LLM/excalidraw/image 6.png|4GPU的interleaved pipeline，图中模型第一层和最后一层是不同颜色的]]
+![[Megatron/LLM/excalidraw/image 6.png|4GPU的interleaved pipeline，图中模型第一层和最后一层是不同颜色的]]
 
 IS中需要额外的通信，因为同一段模型的计算，现在要**多次经过每个 GPU**，而在之前的方案中，仅需一次就能完成。现在每个Forward和Backward被除以一个因子 *v*，其中 *v* 是每个 GPU 上承载的 stage（或模型子块）的数量。这是因为我们能够更好地交错执行前向与反向传播。气泡时间和气泡占比公式如下：
 
@@ -197,7 +197,7 @@ $$
 
 因此，我们现在可以通过**增加 micro-batches**和使用交错阶段（v > 1）来减少 bubble。但需要注意的是，**通信开销也会增加 *****v***** 倍**，这是一种权衡。下图是并行度 *p = 8* 的流水线，然后增加m和v的情况：
 
-![[Z-Essays/LLM/excalidraw/image 7.png]]
+![[Megatron/LLM/excalidraw/image 7.png]]
 
 调度会变复杂，每个GPU每个时刻需要做两种决策：
 
@@ -208,7 +208,7 @@ $$
 
 **Llama 3.1 所采用的流水线并行策略**所需的全部要素就是以上的部分，采用的是1F1B调度+IS交错阶段，并支持广度和深度优先之间调节。
 
-![[Z-Essays/LLM/excalidraw/image 8.png]]
+![[Megatron/LLM/excalidraw/image 8.png]]
 
 接着，PP的新方法（DeepSeek方案[https://arxiv.org/pdf/2412.19437](https://arxiv.org/pdf/2412.19437)）尝试将 bubble **几乎降为零；**
 
